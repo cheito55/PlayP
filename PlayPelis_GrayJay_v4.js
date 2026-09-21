@@ -233,6 +233,35 @@ function catalogVideo(id, title, poster, url) {
 
 var SCRIPT_VERSION = "v5-diag";
 
+function debugItems(header) {
+    var out = [];
+    var lines = (SCRIPT_VERSION + " | BASE " + BASE + "\n" + _debug).split("\n");
+    var n = 0;
+
+    out.push(catalogVideo(
+        "diag_h_" + Math.floor(Math.random() * 1000000),
+        "[DIAG] " + header,
+        "",
+        "ppscrape://debug/" + encodeURIComponent("diag")
+    ));
+
+    for (var i = 0; i < lines.length && n < 12; i++) {
+        var l = String(lines[i]).replace(/^\s+|\s+$/g, "");
+        if (!l) continue;
+        if (l.length > 110) l = l.substring(0, 110);
+
+        out.push(catalogVideo(
+            "diag_" + i + "_" + Math.floor(Math.random() * 1000000),
+            "[DIAG] " + l,
+            "",
+            "ppscrape://debug/" + encodeURIComponent("diag" + i)
+        ));
+        n++;
+    }
+
+    return out;
+}
+
 function debugItem(title) {
     var text = "Script " + SCRIPT_VERSION + "\nBASE: " + BASE + "\n" + _debug;
     if (text.length > 1500) text = text.substring(0, 1500);
@@ -1037,7 +1066,7 @@ if (typeof source != "undefined") {
         }
 
         if (!items.length && DEBUG_THROW) {
-            items = [debugItem("[DIAG] Búsqueda sin resultados - toca para ver el motivo")];
+            items = debugItems("Búsqueda sin resultados");
         }
 
         return new VideoPager(items, false, null);
@@ -1060,7 +1089,7 @@ if (typeof source != "undefined") {
             var t = items.length
                 ? "[DIAG " + SCRIPT_VERSION + "] Home OK con " + items.length + " items - toca para ver log"
                 : "[DIAG " + SCRIPT_VERSION + "] Home VACÍO - toca para ver el motivo";
-            items.unshift(debugItem(t));
+            items = debugItems(t).concat(items);
         }
 
         return new VideoPager(items, false, null);
