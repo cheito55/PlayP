@@ -31,7 +31,7 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
 var MAX_CAND = 8;          /* embeds a resolver por proveedor */
-var WANT_SOURCES = 4;      /* con esto se corta la busqueda (salvo modo "sitios extra") */
+var WANT_SERVERS = 3;      /* servidores distintos que resolvieron: con esto se corta la busqueda (salvo "sitios extra") */
 var BUDGET_MS = 50000;     /* tiempo maximo por pelicula/episodio */
 
 var _settings = {};
@@ -244,16 +244,35 @@ function parseInternal(url) {
 /* fuentes de video                                                    */
 /* ------------------------------------------------------------------ */
 
-function mkSrc(u, label, ref) {
+function reqMod(ref) {
+    if (!ref) return null;
+    var h = { "User-Agent": UA, "Referer": ref }, o = originOf(ref);
+    if (o) h["Origin"] = o;
+    return {
+        headers: h,
+        modifyRequest: function (url, headers) {
+            headers = headers || {};
+            var k;
+            for (k in h) if (h.hasOwnProperty(k)) headers[k] = h[k];
+            return { url: url, headers: headers };
+        }
+    };
+}
+/* force = "hls" | "mp4": para URLs sin extension (ok.ru, vk, vimeo...) */
+function mkSrc(u, label, ref, force) {
     u = cleanUrl(u);
     if (!/^https?:\/\//i.test(u)) return null;
-    var rm = ref ? { headers: { "Referer": ref, "User-Agent": UA } } : null, o;
-    if (/\.m3u8(?:[?#]|$)/i.test(u) || /[?&](?:format|type)=m3u8/i.test(u)) {
+    var rm = reqMod(ref), o, type = force || "";
+    if (!type) {
+        if (/\.m3u8(?:[?#]|$)/i.test(u) || /[?&](?:format|type)=m3u8/i.test(u)) type = "hls";
+        else if (/\.mp4(?:[?#]|$)/i.test(u)) type = "mp4";
+    }
+    if (type == "hls") {
         o = { name: label || "HLS", url: u, duration: 0 };
         if (rm) o.requestModifier = rm;
         return new HLSSource(o);
     }
-    if (/\.mp4(?:[?#]|$)/i.test(u)) {
+    if (type == "mp4") {
         o = { width: 0, height: 0, container: "video/mp4", codec: "", name: label || "MP4", bitrate: 0, duration: 0, url: u };
         if (rm) o.requestModifier = rm;
         return new VideoUrlSource(o);
@@ -313,7 +332,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "dood.", "doodstream.", "dooood.", "uqload.", "voe.sx", "streamtape.", "upstream.to", "streamlare.", "plusvip.net", "sololatino.net", "zplayer.live", "fastream.to", "vidcloud9.org",
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
-    "vimeos", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3"];
+    "vimeos", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3"];
 var UNSUPPORTED = ["waaw.", "netu.", "hqq.", "younetu.", "hqtv.", "biribup.", "cuevana3.download"];
 
 function hostMatches(h, list) {
@@ -324,16 +343,96 @@ function hostMatches(h, list) {
 function isServerUrl(u) { return hostMatches(hostOf(u), SERVER_HOSTS); }
 
 /* --- extractores especificos (portados de PlayPelis) --- */
-function exVoe(url, label, ref) {
-    var h = httpGet(url, ref), m, re = /['"](hls|mp4)['"]\s*:\s*['"]([^'"]+)['"]/gi, out = [];
-    while ((m = re.exec(h || "")) != null) {
-        var v = m[2];
-        if (!/^https?:/i.test(v)) { var d = b64decode(v); if (/^https?:/i.test(d)) v = d; }
-        addSrc(out, mkSrc(v, label, url));
+/* ---- utilidades para los extractores nuevos ---- */
+function htmlUnescape(s) {
+    return String(s || "").replace(/&quot;/g, '"').replace(/&#34;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+        .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+function rot13(s) {
+    return String(s).replace(/[a-zA-Z]/g, function (c) { var b = c <= "Z" ? 65 : 97; return String.fromCharCode((c.charCodeAt(0) - b + 13) % 26 + b); });
+}
+function reverseStr(s) { return String(s).split("").reverse().join(""); }
+/* JSON que empieza despues de "marker" (balanceando llaves) */
+function jsonAfter(text, marker) {
+    var i = String(text || "").indexOf(marker), j, depth = 0, inStr = false, q = "", esc = false, start = -1, ch;
+    if (i < 0) return null;
+    for (j = i + marker.length; j < text.length && j < i + 400000; j++) {
+        ch = text.charAt(j);
+        if (start < 0) { if (ch == "{") { start = j; depth = 1; } continue; }
+        if (inStr) { if (esc) esc = false; else if (ch == "\\") esc = true; else if (ch == q) inStr = false; continue; }
+        if (ch == '"' || ch == "'") { inStr = true; q = ch; continue; }
+        if (ch == "{") depth++;
+        else if (ch == "}") { depth--; if (depth === 0) return parseJson(text.substring(start, j + 1)); }
     }
-    if (!out.length && h) { var g = scanMedia(h, label, url, url), i; for (i = 0; i < g.length; i++) addSrc(out, g[i]); }
+    return null;
+}
+
+/* ---- VOE (varios dominios espejo) ---- */
+var VOE_LUT = ["@$", "^^", "~@", "%?", "*~", "!!", "#&"];
+function voeDecodeWith(enc, lut) {
+    var t = rot13(enc), i;
+    for (i = 0; i < lut.length; i++) t = t.split(lut[i]).join("");
+    var s = b64decode(t), u = "";
+    for (i = 0; i < s.length; i++) u += String.fromCharCode(s.charCodeAt(i) - 3);
+    return parseJson(b64decode(reverseStr(u)));
+}
+function srcsFromVoeJson(o, label, ref) {
+    var out = [], k, v;
+    if (!o) return out;
+    for (k in o) {
+        if (!o.hasOwnProperty(k)) continue;
+        v = o[k];
+        if (typeof v != "string" || !/^https?:\/\//i.test(v)) continue;
+        if (/direct_access|mp4/i.test(k) || /\.mp4(?:[?#]|$)/i.test(v)) addSrc(out, mkSrc(v, label + " MP4", ref, "mp4"));
+        else if (/^(?:source|hls|file|url|src)$/i.test(k)) addSrc(out, mkSrc(v, label, ref, "hls"));
+    }
     return out;
 }
+function voeFromHtml(h, pageUrl, label) {
+    var out = [], m = /json">\s*\[\s*"([^"]+)"\s*\]\s*<\/script>\s*(?:<script[^>]+src="([^"]+)")?/i.exec(h || ""), ref = originOf(pageUrl) + "/", luts = [], i;
+    if (!m) {
+        /* variante vieja: 'hls': 'base64' / "mp4": "..." */
+        var re = /['"](hls|mp4)['"]\s*:\s*['"]([^'"]+)['"]/gi, mm;
+        while ((mm = re.exec(h || "")) != null) {
+            var v = mm[2];
+            if (!/^https?:/i.test(v)) { var d = b64decode(v); if (/^https?:/i.test(d)) v = d; }
+            addSrc(out, mkSrc(v, label, ref, mm[1].toLowerCase() == "mp4" ? "mp4" : "hls"));
+        }
+        if (!out.length) log("    voe: sin bloque cifrado (largo html=" + (h || "").length + ")");
+        return out;
+    }
+    if (m[2]) {
+        var js = httpGet(absUrl(m[2], pageUrl), pageUrl), lm = /(\[(?:'\W{2}'[,\]]){1,9})/.exec(js || "");
+        if (lm) { var arr = lm[1].slice(2, -2).split("','"); if (arr.length) luts.push(arr); log("    voe: LUT del js = " + arr.join(" ")); }
+    }
+    luts.push(VOE_LUT);
+    for (i = 0; i < luts.length; i++) {
+        var o = null;
+        try { o = voeDecodeWith(m[1], luts[i]); } catch (e) { log("    voe decode " + e); }
+        if (o) {
+            out = srcsFromVoeJson(o, label, ref);
+            log("    voe: json ok, claves=" + Object.keys(o).slice(0, 8).join(",") + " -> " + out.length);
+            if (out.length) return out;
+        }
+    }
+    log("    voe: no se pudo descifrar (largo bloque=" + m[1].length + ")");
+    return out;
+}
+function exVoe(url, label, ref) {
+    var h = httpGet(url, ref), tries = 0, m, cur = url;
+    while (h && tries < 3) {
+        var out = voeFromHtml(h, cur, label);
+        if (out.length) return out;
+        m = /(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i.exec(h);
+        if (!m || /^(?:#|javascript)/i.test(m[1])) break;
+        cur = absUrl(m[1], cur);
+        log("    voe: redirect -> " + cur.substring(0, 80));
+        h = httpGet(cur, url);
+        tries++;
+    }
+    return [];
+}
+
 function exUqload(url, label) {
     var u = String(url || ""); if (u.indexOf(".html") < 0) u += ".html";
     var h = httpGet(u, url), m = /sources\s*:\s*\[([^\]]+)\]/i.exec(h || ""), out = [], parts, i;
@@ -381,15 +480,94 @@ function exFastream(url, label) {
     var h = httpPost("https://fastream.to/dl", "op=embed&file_code=" + enc(n) + "&auto=1&referer=", "https://fastream.to/emb.html?" + n, { "Origin": "https://fastream.to" });
     return scanMedia(h, label, "https://fastream.to/", "https://fastream.to/");
 }
-function exOkRu(url, label) {
-    var id = (String(url).match(/(?:videoembed|video)\/(\d+)/) || [])[1];
-    if (!id) return [];
-    var h = httpGet("https://ok.ru/videoembed/" + id, "https://ok.ru/"), out = [];
+/* ---- OK.ru ---- */
+var OK_RANK = { "ultra": 7, "quad": 6, "full": 5, "hd": 4, "sd": 3, "low": 2, "lowest": 1, "mobile": 0 };
+var OK_LABEL = { "ultra": "2160p", "quad": "1440p", "full": "1080p", "hd": "720p", "sd": "480p", "low": "360p", "lowest": "240p", "mobile": "144p" };
+function exOkRu(url, label, ref) {
+    var id = (String(url).match(/(?:videoembed|video|live)\/(\d+)/) || String(url).match(/[?&](?:id|mid)=(\d+)/) || [])[1];
+    if (!id) { log("    ok.ru: sin id en " + url.substring(0, 80)); return []; }
+    var R = "https://ok.ru/", out = [], h = httpGet("https://ok.ru/videoembed/" + id, R);
+    if (!h) h = httpGet("https://ok.ru/video/" + id, R);
     if (!h) return out;
-    var t = h.replace(/&quot;/g, '"').replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\"/g, '"'), m;
-    m = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(t);
-    if (m) addSrc(out, mkSrc(m[1], (label || "OK.ru") + " HLS", "https://ok.ru/"));
-    if (!out.length) { m = /"ondemandHls"\s*:\s*"([^"]+)"/i.exec(t); if (m) addSrc(out, mkSrc(m[1], (label || "OK.ru") + " HLS", "https://ok.ru/")); }
+    var m = /data-options=(?:"([^"]*)"|'([^']*)')/i.exec(h), meta = null, o, fv;
+    if (m) {
+        o = parseJson(htmlUnescape(m[1] != null ? m[1] : m[2]));
+        fv = o && o.flashvars;
+        if (fv) {
+            meta = fv.metadata;
+            if (typeof meta == "string") meta = parseJson(meta);
+            if (!meta && fv.metadataUrl) {
+                var mu = fv.metadataUrl;
+                meta = parseJson(httpGet(mu, R)) || parseJson(httpPost(mu, "", R));
+            }
+        }
+    }
+    if (!meta) {
+        /* plan B: buscar las claves directo en el texto */
+        var t = htmlUnescape(h).replace(/\\\\u0026/g, "&").replace(/\\u0026/g, "&").replace(/\\\\\//g, "/").replace(/\\\//g, "/").replace(/\\"/g, '"'), mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(t);
+        if (mm) addSrc(out, mkSrc(mm[1], label + " HLS", R, "hls"));
+        log("    ok.ru: sin metadata (data-options " + (m ? "presente" : "ausente") + ") plan B -> " + out.length);
+        return out;
+    }
+    var hls = meta.hlsManifestUrl || meta.hlsMasterPlaylistUrl || meta.ondemandHls || "";
+    if (hls) addSrc(out, mkSrc(hls, label + " HLS", R, "hls"));
+    var vids = (meta.videos || []).slice(0);
+    vids.sort(function (a, b) { return (OK_RANK[b.name] || 0) - (OK_RANK[a.name] || 0); });
+    var i;
+    for (i = 0; i < vids.length; i++) if (vids[i].url) addSrc(out, mkSrc(vids[i].url, label + " " + (OK_LABEL[vids[i].name] || vids[i].name || "MP4"), R, "mp4"));
+    log("    ok.ru: hls=" + (hls ? "si" : "no") + " mp4=" + vids.length + (meta.error ? " error=" + meta.error : ""));
+    return out;
+}
+
+/* ---- VK / VK Video ---- */
+function exVk(url, label, ref) {
+    var u = cleanUrl(url), m = /video(-?\d+)_(\d+)/.exec(u);
+    if (u.indexOf("video_ext.php") < 0 && m) u = "https://vk.com/video_ext.php?oid=" + m[1] + "&id=" + m[2] + ((/[?&]hash=([0-9a-f]+)/i.exec(u) || [])[0] || "").replace(/^\?/, "&");
+    var R = hostOf(u).indexOf("vkvideo") >= 0 ? "https://vkvideo.ru/" : "https://vk.com/", h = httpGet(u, ref || R), out = [], list = [], re, k;
+    if (!h) return out;
+    re = /"url(\d{3,4})"\s*:\s*"([^"]+)"/g;
+    while ((k = re.exec(h)) != null) list.push({ q: parseInt(k[1], 10), u: k[2] });
+    list.sort(function (a, b) { return b.q - a.q; });
+    var hl = /"(?:hls|hls_ondemand)"\s*:\s*"([^"]+)"/i.exec(h);
+    if (hl) addSrc(out, mkSrc(hl[1], label + " HLS", R, "hls"));
+    var i;
+    for (i = 0; i < list.length; i++) addSrc(out, mkSrc(list[i].u, label + " " + list[i].q + "p", R, "mp4"));
+    if (!out.length) {
+        var err = /"(?:error|error_text|msg)"\s*:\s*"([^"]{3,120})"/i.exec(h);
+        log("    vk: sin fuentes (largo=" + h.length + (err ? ", " + err[1] : "") + ")");
+    } else log("    vk: hls=" + (hl ? "si" : "no") + " mp4=" + list.length);
+    return out;
+}
+
+/* ---- Vimeo ---- */
+function vimeoSources(cfg, label) {
+    var out = [], R = "https://player.vimeo.com/", files = cfg && cfg.request && cfg.request.files, i, k;
+    if (!files) return out;
+    if (files.hls) {
+        var cdns = files.hls.cdns || {}, def = files.hls.default_cdn, c = cdns[def] || null;
+        if (!c) for (k in cdns) if (cdns.hasOwnProperty(k)) { c = cdns[k]; break; }
+        var hu = (c && (c.url || c.avc_url)) || files.hls.url || "";
+        if (hu) addSrc(out, mkSrc(hu, label + " HLS", R, "hls"));
+    }
+    var pr = (files.progressive || []).slice(0);
+    pr.sort(function (a, b) { return (b.height || 0) - (a.height || 0); });
+    for (i = 0; i < pr.length; i++) if (pr[i].url) addSrc(out, mkSrc(pr[i].url, label + " " + (pr[i].quality || pr[i].height || "MP4"), R, "mp4"));
+    return out;
+}
+function exVimeo(url, label, ref) {
+    var id = (/(?:player\.vimeo\.com\/video|vimeo\.com)\/(?:video\/)?(\d+)/.exec(url) || [])[1];
+    if (!id) return [];
+    var hash = (/[?&]h=([0-9a-f]+)/i.exec(url) || /vimeo\.com\/\d+\/([0-9a-f]{8,})/i.exec(url) || [])[1] || "";
+    var refs = uniq([ref || "", ref ? originOf(ref) + "/" : "", "https://player.vimeo.com/"]), i, out = [], q = hash ? "?h=" + hash : "";
+    for (i = 0; i < refs.length && !out.length && budgetLeft(); i++) {
+        var cfg = parseJson(httpGet("https://player.vimeo.com/video/" + id + "/config" + q, refs[i] || "https://player.vimeo.com/"));
+        if (!cfg) {
+            var page = httpGet("https://player.vimeo.com/video/" + id + q, refs[i] || "https://player.vimeo.com/");
+            cfg = jsonAfter(page, "playerConfig = ") || jsonAfter(page, "playerConfig=") || jsonAfter(page, "var config = ");
+        }
+        out = vimeoSources(cfg, label);
+        log("    vimeo id=" + id + (hash ? " h" : "") + " ref=" + (refs[i] || "-").substring(0, 40) + " -> " + out.length + (cfg && cfg.message ? " (" + String(cfg.message).substring(0, 80) + ")" : (cfg ? "" : " (sin config)")));
+    }
     return out;
 }
 
@@ -428,6 +606,8 @@ function exGeneric(url, label, ref, depth) {
     var h = httpGet(url, ref || (originOf(url) + "/")), out, i, links;
     if (!h) return [];
     out = scanMedia(h, label, url, url);
+    if (out.length) return out;
+    out = voeFromHtml(h, url, label);
     if (out.length || depth >= 3) return out;
     links = discoverLinks(h, url);
     for (i = 0; i < links.length && budgetLeft() && out.length < 6; i++) {
@@ -447,13 +627,15 @@ function resolveEmbed(url, label, ref, depth) {
     if (d) return [d];
     if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
     if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
+    if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
+    if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
     if (h.indexOf("uqload.") >= 0) return exUqload(url, label);
     if (h.indexOf("streamtape.") >= 0 || /(?:^|\.)tape\./.test(h)) return exStreamTape(url, label);
     if (h.indexOf("dood") >= 0 || /d[o]{3,}d/.test(h)) return exDood(url, label);
     if (h.indexOf("plusvip.") >= 0) return exPlusVip(url, label);
     if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
-    if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("okru.link") >= 0) return exOkRu(url, label);
+    if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
     return exGeneric(url, label, ref, depth);
 }
 
@@ -551,7 +733,7 @@ function resolveCands(cands, out, prov) {
         seen[k] = 1; list.push(c);
     }
     list.sort(function (a, b) { return langRank(a.lang) - langRank(b.lang); });
-    var n = 0;
+    var n = 0, good = 0;
     for (i = 0; i < list.length && n < MAX_CAND && budgetLeft(); i++) {
         c = list[i];
         var label = (c.lang ? c.lang + " \u00b7 " : "") + prov + " \u00b7 " + (c.url ? prettyHost(c.url) : "directo"), got = [], j;
@@ -562,8 +744,11 @@ function resolveCands(cands, out, prov) {
         }
         n++;
         log("  " + label + " [" + (c.url || "").substring(0, 70) + "] -> " + got.length);
+        var before = out.length;
         for (j = 0; j < got.length; j++) { got[j].name = got[j].name && got[j].name.indexOf(prov) >= 0 ? got[j].name : label; addSrc(out, got[j]); }
+        if (out.length > before) good++;
     }
+    return good;
 }
 
 /* ------------------------------------------------------------------ */
@@ -838,18 +1023,18 @@ function provSite(site, ctx) {
 /* ------------------------------------------------------------------ */
 
 function collectSources(ctx) {
-    var out = [], plan = [], i;
+    var out = [], plan = [], i, servers = 0;
     plan.push({ n: "PelisJuanita", f: provJuanita });
     plan.push({ n: "Cuevana3", f: provCuevana });
     function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
     for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
-        if (out.length >= WANT_SOURCES && !extraSites()) { log("Suficientes fuentes (" + out.length + "), no se buscan mas sitios"); break; }
+        if (servers >= WANT_SERVERS && !extraSites()) { log("Suficientes servidores (" + servers + "), no se buscan mas sitios"); break; }
         log("> " + plan[i].n);
         try {
             var c = plan[i].f(ctx);
-            resolveCands(c, out, plan[i].n);
+            servers += resolveCands(c, out, plan[i].n);
         } catch (e) { log("  ERROR " + e); }
     }
     var idx = [];
