@@ -1,5 +1,5 @@
 /*
- * PlayPelis GrayJay Source v10 - TMDB catalog + provider playback
+ * PlayPelis GrayJay Source v13 - APK-style fast server discovery + PCAP CDN resolvers
  *
  * Catálogos descubiertos en el APK PlayPelis:
  * Pelisplushd, Cuevana3, PeliSmart, Movie123, Bflix, New Movies 123,
@@ -18,7 +18,7 @@
  * de embeds, y deja trazas de lo que encontró.
  */
 
-var PID = "f1a0c9d8-6e72-4b35-a941-2c7d8e5f3019";
+var PID = "6f3e0b5d-2b6f-4c9b-9b13-4a8e7d1c6f52";
 var PLATFORM = "PlayPelis";
 var PPID = new PlatformID(PLATFORM, PLATFORM, PID);
 
@@ -30,7 +30,7 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_SOURCES = 24;
 var MAX_CRAWL = 10;
-var MAX_SERVER_CANDIDATES = 12;
+var MAX_SERVER_CANDIDATES = 8;
 var MAX_EPISODES = 300;
 var MAX_HTML = 2500000;
 
@@ -55,7 +55,7 @@ var PROVIDERS = [
 var SERVER_HOSTS = [
     "streamsb.net","streamsss.net","ssbstream.net","watchsb.com","sbanh.com","sbfast.com","sbfast.live","sbfull.com","sbplay.one","sbplay.org","sbplay1.com","sbplay2.com","sbplay2.xyz","sbplay3.com","sblongvu.com","lvturbo.com",
     "dood.cx","dood.la","dood.pm","dood.sh","dood.so","dood.to","dood.watch","dood.wf","dood.ws","dood.yt","doodstream.com",
-    "uqload.co","uqload.com","voe.sx","streamtape.com","upstream.to","streamlare.com","plusvip.net","re.sololatino.net","v2.zplayer.live","zplayer.live","fastream.to","vidcloud9.org","doc.vidcloud9.org","okru.link","playhide.online","moonplayer.lat","pelisplay.cc","pelisplus.esplay.io","pelisplus.esplay.one","api.mycdn.moe","pelisplus.esplay.io","pelisplus.esplay.one"
+    "uqload.co","uqload.com","voe.sx","streamtape.com","upstream.to","streamlare.com","plusvip.net","re.sololatino.net","v2.zplayer.live","zplayer.live","fastream.to","vidcloud9.org","doc.vidcloud9.org","okru.link","playhide.online","moonplayer.lat","pelisplay.cc","pelisplus.esplay.io","pelisplus.esplay.one","api.mycdn.moe","pelisplus.esplay.io","pelisplus.esplay.one","dramiyos-cdn.com","solo-latino.com","latino.solo-latino.com","data-limit-c.solo-latino.com"
 ];
 
 var _settings = {};
@@ -136,9 +136,9 @@ function homeProviders(){var all=[],i,r;for(i=0;i<PROVIDERS.length&&all.length<M
 
 function tmdbGet(path){var u=TMDB_API+path+(path.indexOf("?")>=0?"&":"?")+"api_key="+enc(TMDB_KEY)+"&language=es-AR";try{var r=http.GET(u,{"User-Agent":UA,"Accept":"application/json"}),b=readBody(r);return b?JSON.parse(b):null;}catch(e){log("TMDB "+String(e));return null;}}
 function tmdbPoster(p){return p?TMDB_IMG+p:"";}
-function tmdbList(path){var d=tmdbGet(path),out=[],i,x;if(!d||!d.results)return out;for(i=0;i<d.results.length&&out.length<MAX_ITEMS;i++){x=d.results[i];if(x&&(x.media_type=="movie"||x.media_type=="tv"))out.push({title:x.title||x.name,url:"ppv12://tmdb/"+(x.media_type=="tv"?"tvshow":"movie")+"/"+x.id,poster:tmdbPoster(x.poster_path),type:x.media_type=="tv"?"tvshow":"movie",tmdbId:x.id});}return out;}
+function tmdbList(path){var d=tmdbGet(path),out=[],i,x;if(!d||!d.results)return out;for(i=0;i<d.results.length&&out.length<MAX_ITEMS;i++){x=d.results[i];if(x&&(x.media_type=="movie"||x.media_type=="tv"))out.push({title:x.title||x.name,url:"ppv13://tmdb/"+(x.media_type=="tv"?"tvshow":"movie")+"/"+x.id,poster:tmdbPoster(x.poster_path),type:x.media_type=="tv"?"tvshow":"movie",tmdbId:x.id});}return out;}
 
-function makeWeb(kind,url){return "ppv12://web/"+kind+"/"+enc(url);}
+function makeWeb(kind,url){return "ppv13://web/"+kind+"/"+enc(url);}
 function parseInternal(url){var s=String(url||""),m=s.match(/^ppv12:\/\/web\/(movie|tvshow|episode)\/(.+)$/);if(m)return{mode:"web",kind:m[1],url:dec(m[2])};m=s.match(/^ppv12:\/\/tmdb\/(movie|tvshow)\/(\d+)$/);if(m)return{mode:"tmdb",kind:m[1],id:m[2]};return null;}
 function author(){return new PlatformAuthorLink(PPID,"PlayPelis", "https://github.com/cheito55/PlayP", "", 0);}
 function thumb(u){return u?new Thumbnails([new Thumbnail(u,100)]):new Thumbnails([]);}
@@ -207,6 +207,16 @@ function extractorStreamSB(url,label){
     return out;
 }
 function extractorZplayer(url,label){var h=httpGet(url,baseFor(url)),out=[];if(!h)return out;addDirectFromText(out,h,label||"MorphMdia");return out;}
+function extractorPcapCdn(url,label){
+    var h=httpGet(url,baseFor(url)),out=[];
+    if(!h)return out;
+    addDirectFromText(out,h,label||"PlayPelis CDN");
+    var j=extractJsonMedia(h,label||"PlayPelis CDN"),i;
+    for(i=0;i<j.length;i++)addSource(out,j[i],label||"PlayPelis CDN");
+    var re=/(?:file|src|source|playlist|stream|hls|url)\s*[:=]\s*[\"']([^\"']+)/gi,m,s;
+    while((m=re.exec(h))!=null){s=directMedia(clean(m[1]),label||"PlayPelis CDN");if(s)addSource(out,s,label||"PlayPelis CDN");}
+    return out;
+}
 function extractorGeneric(url,label,depth){
     if(depth>2)return[];var h=httpGet(url,baseFor(url)),out=[],i,m,links=[];if(!h)return out;
     addDirectFromText(out,h,label);var jm=extractJsonMedia(h,label);for(i=0;i<jm.length;i++)addSource(out,jm[i],label);if(out.length)return out;
@@ -227,6 +237,8 @@ function extractServerUrl(url,depth,label){
     if(h.indexOf("pelisplus.esplay")>=0)return extractorEsplay(u,label||"EchoVision");
     if(h.indexOf("fastream.")>=0)return extractorFastream(u,label||"sFTekh");
     if(h.indexOf("api.mycdn.moe")>=0)return extractorMyCdn(u,depth,label||"MyCDN");
+    if(h.indexOf("dramiyos-cdn.com")>=0)return extractorPcapCdn(u,label||"Dramiyos");
+    if(h.indexOf("solo-latino.com")>=0)return extractorPcapCdn(u,label||"Solo-Latino");
     if(h.indexOf("watchsb.")>=0||h.indexOf("sbplay")>=0||h.indexOf("sbfast")>=0||h.indexOf("sbanh")>=0||h.indexOf("sbembed")>=0||h.indexOf("lvturbo")>=0)return extractorStreamSB(u,label||"StrmWorks");
     if(h.indexOf("zplayer")>=0)return extractorZplayer(u,label||"MorphMdia");
     return extractorGeneric(u,label||h,depth);
@@ -235,10 +247,41 @@ function pelisAjax(url,isEpisode){var p=providerFor(url);if(!p||p.name!="Pelispl
 function parseNextData(h){var m=/<script[^>]+id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i.exec(h||"");if(!m)return null;try{return JSON.parse(m[1]);}catch(e){return null;}}
 function cuevana2Candidates(h){var out=[],d=parseNextData(h),p=d&&d.props&&d.props.pageProps,players=p&&(p.episode&&p.episode.players||p.post&&p.post.players),k,x,i,j; if(!players)return out;for(k in players){x=players[k];if(!x||!x.length)continue;for(i=0;i<x.length;i++){j=x[i];if(j&&j.result)out.push({url:j.result,label:clean(String(j.cyberlocker||"server"))+" "+clean(String(j.quality||""))});}}return out;}
 function cuevana3Candidates(h,base){var out=[],re=/<(?:li|div)[^>]+(?:class=["'][^"']*option[^"']*["'][^>]+)?data-link=["']([^"']+)["'][^>]*>/gi,m;while((m=re.exec(h||""))!=null)out.push({url:absUrl(m[1],base),label:"Cuevana3"});var r=/data-server=["']([^"']+)["']/gi;while((m=r.exec(h||""))!=null){var d=b64decode(m[1]);if(d&&/^https?:\/\//i.test(d))out.push({url:d,label:"Cuevana3"});}return out;}
+function pelisPlusExactCandidates(url){
+    var out=[],seen={},base="https://pelisplushd.nu",h="",m,i,p,ph,mm;
+    h=httpGet(url,base);
+    if(!h)return out;
+    function add(u,label){u=clean(u);if(!u||!/^https?:\/\//i.test(u)||seen[u]||out.length>=8)return;seen[u]=1;out.push({url:u,label:label||"PelisPlus"});}
+    var v=/\bdiv[^>]*class=[\"'][^\"']*video[^\"']*[\"'][^>]*>/i.exec(h);
+    var start=v?v.index:0;
+    var tail=v?h.substring(start,start+12000):h;
+    var hrefs=/https?:\/\/[^\s\"'<>]+/gi;
+    while((m=hrefs.exec(tail))!=null){p=m[0];if(/\/(?:video|embed\.php|ext\.php)/i.test(p))add(p,"PelisPlus option");}
+    var onclick=/go_to_player\(['\"]([^'\"]+)/gi;
+    while((m=onclick.exec(h))!=null&&out.length<8){p=m[1];if(/^https?:/i.test(p))add(p,"PelisPlus option");else add("https://api.mycdn.moe/player/?id="+p,"MyCDN");}
+    return out;
+}
+function cuevana3ExactCandidates(url,base){
+    var out=[],seen={},h=httpGet(url,base),m,src,id,parent;
+    function add(u,label){u=clean(u);if(!u||!/^https?:\/\//i.test(u)||seen[u]||out.length>=8)return;seen[u]=1;out.push({url:u,label:label||"Cuevana3"});}
+    if(!h)return out;
+    var re=/<iframe\b[^>]*>/gi;
+    while((m=re.exec(h))!=null&&out.length<8){src=attr(m[0],"data-src")||attr(m[0],"src");if(!src)continue;if(/goto_ddh\.ph/i.test(src))continue;var pos=m.index;parent=h.substring(Math.max(0,pos-1200),pos);id=(parent.match(/id=[\"']([^\"']+)[\"']/i)||[])[1]||"";add(absUrl(src,base),/OptL/i.test(id)?"Latino":(/OptS/i.test(id)?"Subtitulado":"Español"));}
+    return out;
+}
 function providerPageSources(url,kind){
     var candidates=[],p=providerFor(url),i,h,m,seen={};
     function addCandidate(x,label){var u=typeof x=="string"?x:x&&x.url;label=label||(x&&x.label)||"Server";u=clean(u);if(!u||!/^https?:\/\//i.test(u)||seen[u]||candidates.length>=MAX_SERVER_CANDIDATES)return;seen[u]=1;candidates.push({url:u,label:label});}
-    if(p&&p.name=="Pelisplushd"){var pa=pelisAjax(url,kind=="episode");for(i=0;i<pa.length;i++)addCandidate(pa[i]);}
+    if(p&&p.name=="Pelisplushd"){
+        var ex=pelisPlusExactCandidates(url);
+        for(i=0;i<ex.length;i++)addCandidate(ex[i]);
+        var pa=pelisAjax(url,kind=="episode");
+        for(i=0;i<pa.length;i++)addCandidate(pa[i]);
+    }
+    if(p&&p.name.indexOf("Cuevana3")==0){
+        var ce=cuevana3ExactCandidates(url,p.base);
+        for(i=0;i<ce.length;i++)addCandidate(ce[i]);
+    }
     h=httpGet(url,p?p.base:baseFor(url));
     if(h){
         var direct=/https?:\/\/[^\s"'<>\\]+/gi;while((m=direct.exec(h))!=null&&candidates.length<MAX_SERVER_CANDIDATES)if(/\.m3u8(?:\?|$)|\.mp4(?:\?|$)/i.test(m[0]))addCandidate(m[0],"Direct");
@@ -249,7 +292,6 @@ function providerPageSources(url,kind){
         var ds=/data-server=["']([^"']+)/gi;while((m=ds.exec(h))!=null&&candidates.length<MAX_SERVER_CANDIDATES){var raw=m[1].split("?v=")[1]||m[1],dd=b64decode(raw);if(dd)addCandidate(dd,"Server");}
         var oc=/onclick=["'][^"']*go_to_player\(['"]([^'"]+)/gi;while((m=oc.exec(h))!=null&&candidates.length<MAX_SERVER_CANDIDATES)addCandidate(m[1].indexOf("http")==0?m[1]:"https://api.mycdn.moe/player/?id="+m[1],"MyCDN");
     }
-    addCandidate(url,p?p.name:hostOf(url));
     var sources=[],seenS={};
     for(i=0;i<candidates.length&&sources.length<MAX_SOURCES;i++){
         var got=extractServerUrl(candidates[i].url,0,candidates[i].label),j;
@@ -262,17 +304,28 @@ function providerPageSources(url,kind){
 function genericDetail(url){var p=providerFor(url),b=baseFor(url),h=httpGet(url,b);if(!h)return null;var title=firstTag(h,"h1")||textIn(h,"entry-title")||textIn(h,"heading-name")||textIn(h,"title"),poster=firstImg(h,b),syn=textIn(h,"description")||textIn(h,"sinopsis")||textIn(h,"overview");if(!title){var og=/property=["']og:title["'][^>]*content=["']([^"']+)/i.exec(h);if(og)title=clean(og[1]);}if(!poster){var om=/property=["']og:image["'][^>]*content=["']([^"']+)/i.exec(h);if(om)poster=absUrl(om[1],b);}return{title:clean(title),poster:poster,synopsis:clean(syn),provider:p?p.name:hostOf(url),sources:providerPageSources(url,typeFor(url))};}
 function tmdbDetails(kind,id){var d=tmdbGet("/"+(kind=="tvshow"?"tv":"movie")+"/"+id);if(!d)return null;return{title:d.title||d.name,poster:tmdbPoster(d.poster_path),synopsis:d.overview||"",year:String(d.release_date||d.first_air_date||"").substring(0,4),kind:kind};}
 function findProviderMatch(title,kind){
-    var q=normalizeTitle(title),best=null,score=-1,i,j,r,t,s;
-    var order=["Cuevana3Me","Cuevana3","Cuevana3CC","PeliSmart","SmartPelis","Bflix","Gnula","Cuevana2","EntrePeliculas"];
+    var q=normalizeTitle(title),best=null,score=-1,i,j,r,t,s,k;
+    /* PCAP/APK informed order: avoid the old 13-provider serial crawl. */
+    var order=["Pelisplushd","Cuevana3","PeliSmart","Cuevana2"];
     for(i=0;i<order.length;i++){
-        for(j=0;j<PROVIDERS.length;j++)if(PROVIDERS[j].name==order[i]){r=parseProviderSearch(PROVIDERS[j],title);for(var k=0;k<r.length;k++){t=normalizeTitle(r[k].title);if(!t)continue;s=(t==q?120:((t.indexOf(q)>=0||q.indexOf(t)>=0)?75:0));if(kind==r[k].type)s+=10;if(s>score){score=s;best=r[k];}}if(score>=130)return best;break;}
+        for(j=0;j<PROVIDERS.length;j++){
+            if(PROVIDERS[j].name!=order[i])continue;
+            r=parseProviderSearch(PROVIDERS[j],title);
+            for(k=0;k<r.length;k++){
+                t=normalizeTitle(r[k].title); if(!t)continue;
+                s=(t==q?120:((t.indexOf(q)>=0||q.indexOf(t)>=0)?75:0));
+                if(kind==r[k].type)s+=10;
+                if(s>score){score=s;best=r[k];}
+                if(s>=130){log("MATCH "+title+" -> "+best.provider+" / "+best.title+" score="+score);return best;}
+            }
+            break;
+        }
     }
-    if(!best){
-        for(i=0;i<PROVIDERS.length;i++){r=parseProviderSearch(PROVIDERS[i],title);for(j=0;j<r.length;j++){t=normalizeTitle(r[j].title);s=(t==q?120:((t.indexOf(q)>=0||q.indexOf(t)>=0)?70:0));if(kind==r[j].type)s+=10;if(s>score){score=s;best=r[j];}}if(score>=130)break;}
-    }
-    if(best)log("MATCH "+title+" -> "+best.provider+" / "+best.title+" score="+score);else log("NO PROVIDER MATCH for "+title);
+    if(best)log("MATCH "+title+" -> "+best.provider+" / "+best.title+" score="+score);
+    else log("NO PROVIDER MATCH for "+title);
     return best;
 }
+
 function search(query){
     resetDebug();
     var t=tmdbList("/search/multi?query="+enc(query)+"&page=1&include_adult=false");
@@ -289,7 +342,7 @@ function home(){
     if(!r.length) log("TMDB HOME returned 0 results");
     return r;
 }
-function details(url){var p=parseInternal(url);if(!p)return null;if(p.mode=="tmdb"){var td=tmdbDetails(p.kind,p.id);if(!td)return null;var m=findProviderMatch(td.title,p.kind);if(m){var gd=genericDetail(m.url);if(gd&&gd.sources.length)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:gd.title||td.title,thumbnails:thumb(gd.poster||td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:makeWeb(p.kind,m.url),video:new VideoSourceDescriptor(gd.sources),description:td.synopsis+"\n\nProveedor: "+gd.provider+"\nFuentes: "+gd.sources.length+"\n\n=== DEBUG ===\n"+_debug});}return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:td.title,thumbnails:thumb(td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:url,video:new VideoSourceDescriptor([]),description:td.synopsis+"\n\nNo se encontró una fuente reproducible.\n\n=== DEBUG ===\n"+_debug});}
+function details(url){var p=parseInternal(url);if(!p)return null;if(p.mode=="tmdb"){var td=tmdbDetails(p.kind,p.id);if(!td)return null;log("TMDB DETAIL "+td.title+" / "+p.kind);var m=findProviderMatch(td.title,p.kind);if(m){log("DISCOVER PROVIDER "+m.provider);var gd=genericDetail(m.url);if(gd&&gd.sources.length)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:gd.title||td.title,thumbnails:thumb(gd.poster||td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:makeWeb(p.kind,m.url),video:new VideoSourceDescriptor(gd.sources),description:td.synopsis+"\n\nProveedor: "+gd.provider+"\nFuentes: "+gd.sources.length+"\n\n=== DEBUG ===\n"+_debug});}return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:td.title,thumbnails:thumb(td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:url,video:new VideoSourceDescriptor([]),description:td.synopsis+"\n\nNo se encontró una fuente reproducible.\n\n=== DEBUG ===\n"+_debug});}
     var d=genericDetail(p.url);if(!d)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"err_"+enc(p.url),PID),name:"PlayPelis: sin respuesta",thumbnails:new Thumbnails([]),author:author(),uploadDate:0,viewCount:0,isLive:false,url:p.url,video:new VideoSourceDescriptor([]),description:"El proveedor no devolvió HTML.\n\n=== DEBUG ===\n"+_debug});return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"web_"+enc(p.url),PID),name:d.title||"Sin título",thumbnails:thumb(d.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:p.url,video:new VideoSourceDescriptor(d.sources),description:(d.synopsis||"")+"\n\nCatálogo/proveedor: "+d.provider+"\nFuentes descubiertas: "+d.sources.length+"\n\n=== DEBUG ===\n"+_debug});
 }
 if(typeof source!="undefined"){
