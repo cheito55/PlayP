@@ -1,0 +1,37 @@
+{
+  "name": "PlayPelis Scraper",
+  "description": "PlayPelis GrayJay basado en el proveedor HTML Pelisplushd recuperado del APK: búsqueda, títulos, carátulas, detalles, episodios y resolución de algunas fuentes directas.",
+  "author": "cheito55",
+  "authorUrl": "",
+  "sourceUrl": "https://github.com/cheito55/PlayP",
+  "repositoryUrl": "https://github.com/cheito55/PlayP",
+  "scriptUrl": "./PlayPelis_GrayJay_v4.js",
+  "version": 4,
+  "iconUrl": "",
+  "id": "c1d7a4e2-8f36-4b90-a125-63e9d7f10482",
+  "scriptSignature": "",
+  "scriptPublicKey": "",
+  "packages": [
+    "Http",
+    "Utilities"
+  ],
+  "allowEval": false,
+  "allowUrls": [
+    "pelisplushd.nu",
+    "voe.sx",
+    "uqload.com",
+    "uqload.co",
+    "streamtape.com",
+    "dood.wf",
+    "doodstream.com",
+    "dood.to",
+    "dood.cx",
+    "dood.sh",
+    "dood.watch",
+    "dood.pm",
+    "dood.so",
+    "dood.ws",
+    "dood.yt",
+    "dood.la"
+  ]
+}
