@@ -6,23 +6,19 @@
   "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
   "scriptUrl": "./PlayPelis_GrayJay_v4.js",
-  "version": 7,
+  "version": 8,
   "iconUrl": "",
-  "id": "c4a91d2e-7b53-4e8a-9f10-6d32b7c45190",
+  "id": "d7b2e9c1-4f63-48a1-a5e7-91c3b6d82470",
   "scriptSignature": "",
   "scriptPublicKey": "",
   "packages": ["Http", "Utilities"],
   "allowEval": false,
   "allowUrls": [
     "api.themoviedb.org", "image.tmdb.org",
-    "cuevana3.ai", "smartpeli.tv", "bflix.gg", "cuevana2.biz",
-    "api.mycdn.moe", "streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.com",
-    "sbanh.com", "sbfast.com", "sbfast.live", "sbfull.com", "sbplay.one", "sbplay.org",
-    "sbplay1.com", "sbplay2.com", "sbplay2.xyz", "sbplay3.com", "sblongvu.com", "lvturbo.com",
+    "cuevana3.ai", "cuevana3.me", "cuevana3.cc", "smartpeli.tv", "smartpelis.tv", "bflix.gg", "cuevana2.biz", "gnula.uno", "entrepeliculasyseries.nz",
+    "pelisplushd.nu", "pelisplus.esplay.io", "pelisplus.esplay.one", "api.mycdn.moe",
+    "streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.com", "sbanh.com", "sbfast.com", "sbfast.live", "sbfull.com", "sbplay.one", "sbplay.org", "sbplay1.com", "sbplay2.com", "sbplay2.xyz", "sbplay3.com", "sblongvu.com", "lvturbo.com",
     "dood.cx", "dood.la", "dood.pm", "dood.sh", "dood.so", "dood.to", "dood.watch", "dood.wf", "dood.ws", "dood.yt", "doodstream.com",
-    "uqload.co", "uqload.com", "voe.sx", "streamtape.com", "upstream.to", "streamlare.com",
-    "plusvip.net", "re.sololatino.net", "v2.zplayer.live", "zplayer.live", "fastream.to",
-    "vidcloud9.org", "doc.vidcloud9.org", "okru.link", "playhide.online", "moonplayer.lat", "pelisplay.cc",
-    "pelisplus.esplay.io", "pelisplus.esplay.one"
+    "uqload.co", "uqload.com", "voe.sx", "streamtape.com", "upstream.to", "streamlare.com", "plusvip.net", "re.sololatino.net", "v2.zplayer.live", "zplayer.live", "fastream.to", "vidcloud9.org", "doc.vidcloud9.org", "okru.link", "playhide.online", "moonplayer.lat", "pelisplay.cc"
   ]
 }
