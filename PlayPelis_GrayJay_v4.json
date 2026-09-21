@@ -3,7 +3,7 @@
   "description": "PlayPelis GrayJay multi-proveedor: Pelisplushd, Cuevana3, Cuevana3So, PeliSmart, Movie123, Bflix, New Movies 123, Cuevana2, Gnula, EntrePeliculasYSeries y PelisPlus2AI. TMDB queda como fallback de catálogo y posters. No depende de api.esplay.one.",
   "author": "cheito55",
   "authorUrl": "",
-  "sourceUrl": "https://github.com/cheito55/PlayP",
+  "sourceUrl": "https://github.com/cheito55/PlayP/blob/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
   "scriptUrl": "./PlayPelis_GrayJay_v6.js",
   "version": 6,
