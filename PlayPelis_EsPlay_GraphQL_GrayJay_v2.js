@@ -1,24 +1,18 @@
 /*
- * PlayPelis / ESPlay GraphQL - GrayJay Source v3
+ * PlayPelis / ESPlay GraphQL - GrayJay Source v3.1
  * ES5 compatible.
  *
- * Flujo:
- *   GrayJay -> GraphQL -> catálogo/títulos -> carátulas -> detalles
- *           -> videoLinks/queryVideos -> fuentes HLS/MP4
- *
- * v3:
- * - POST compatible con las variantes http.POST/http.post de GrayJay.
- * - Mejor diagnóstico HTTP/GraphQL.
- * - Carátulas: URL completa, rutas relativas y variantes de portada.
- * - Búsqueda separada de películas y series.
- * - Detalles y episodios.
- * - Acepta HLS aunque la URL tenga query-string y fuentes marcadas
- *   explícitamente como hls/m3u8/mp4.
- * - Solo devuelve como reproductor URLs de medios directos; no inventa
- *   enlaces cuando ESPlay devuelve un embed no reproducible.
+ * Cambios v3.1:
+ * - PID igual al id del JSON.
+ * - types: [Type.Feed.Mixed] en getSearchCapabilities.
+ * - http.POST con 4 argumentos (useAuth = false).
+ * - Modo diagnóstico (DEBUG_THROW): si Home o búsqueda quedan vacíos,
+ *   se lanza un ScriptException con el motivo para verlo en la app.
+ * - La URL de episodio incluye el slug de la serie (ya no depende de
+ *   una búsqueda vacía).
  */
 
-var PID = "f8c3b1e7-6a42-4d9e-b205-71c8a4f9306d";
+var PID = "b7c1e4d2-6a91-4f38-9c25-73e8b1a4d650";
 var PLATFORM = "PlayPelis";
 var PPID = new PlatformID(PLATFORM, PLATFORM, PID);
 
@@ -27,6 +21,9 @@ var WEB = "https://pelisplus2.ai";
 var STATIC = "https://static.esplay.one";
 
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+/* Ponlo en false cuando todo funcione. */
+var DEBUG_THROW = true;
 
 var _settings = {};
 var _debug = "";
@@ -53,10 +50,6 @@ function cleanUrl(s) {
         .trim();
 }
 
-/*
- * GrayJay installations have appeared with both POST spellings.
- * Try the common uppercase form first, then lowercase.
- */
 function httpPostJson(url, obj) {
     var body = JSON.stringify(obj);
     var headers = {
@@ -68,29 +61,22 @@ function httpPostJson(url, obj) {
     };
 
     var r = null;
-    var lastError = "";
 
     try {
-        if (typeof http !== "undefined" && typeof http.POST === "function") {
-            r = http.POST(url, body, headers);
-        }
+        r = http.POST(url, body, headers, false);
     } catch (e1) {
-        lastError = String(e1);
-    }
-
-    if (!r) {
-        try {
-            if (typeof http !== "undefined" && typeof http.post === "function") {
-                r = http.post(url, body, headers);
-            }
-        } catch (e2) {
-            lastError = String(e2);
-        }
-    }
-
-    if (!r) {
-        log("HTTP POST sin respuesta: " + lastError);
+        log("HTTP POST exception: " + String(e1));
         return null;
+    }
+
+    if (!r) {
+        log("HTTP POST sin respuesta");
+        return null;
+    }
+
+    if (r.code !== undefined && r.code !== 200) {
+        log("HTTP code " + r.code + ": " +
+            String(r.body || "").substring(0, 300));
     }
 
     var text = "";
@@ -100,8 +86,6 @@ function httpPostJson(url, obj) {
             text = r;
         } else if (r.body != null) {
             text = String(r.body);
-        } else if (r.data != null && typeof r.data === "string") {
-            text = r.data;
         } else {
             text = JSON.stringify(r);
         }
@@ -132,24 +116,20 @@ function gql(query, variables) {
     if (!r) return null;
 
     if (r.errors && r.errors.length) {
-        log("GraphQL error: " + JSON.stringify(r.errors));
+        log("GraphQL error: " + JSON.stringify(r.errors).substring(0, 500));
         return null;
     }
 
     if (!r.data) {
-        log("GraphQL sin data: " + JSON.stringify(r).substring(0, 1000));
+        log("GraphQL sin data: " + JSON.stringify(r).substring(0, 500));
         return null;
     }
 
     return r.data;
 }
 
-/*
- * Carátulas:
- * 1) Si la API ya entrega http(s), se usa directamente.
- * 2) Se prueban varias rutas conocidas para que GrayJay tenga alternativas.
- *    No se consulta una página HTML para obtener imágenes.
- */
+/* ---------- Carátulas ---------- */
+
 function coverCandidates(type, path, small) {
     var out = [];
     var seen = {};
@@ -179,19 +159,11 @@ function coverCandidates(type, path, small) {
     add(STATIC + "/" + type + "/cover/original/" + p);
     add(STATIC + "/" + type + "/cover/small/" + p);
 
-    /*
-     * Si coverPath ya viene con una parte de la ruta, evita duplicarla.
-     */
     if (p.indexOf(type + "/") === 0) {
         add(STATIC + "/" + p);
     }
 
     return out;
-}
-
-function cover(type, path, small) {
-    var a = coverCandidates(type, path, small);
-    return a.length ? a[0] : "";
 }
 
 function thumb(urls) {
@@ -235,6 +207,8 @@ function makeVideo(id, title, images, url) {
         isLive: false
     });
 }
+
+/* ---------- Fuentes de video ---------- */
 
 function isHls(url, item) {
     var u = String(url || "").toLowerCase();
@@ -310,12 +284,15 @@ function sourceList(items) {
             out.push(src);
             log("SOURCE OK: " + u);
         } else {
-            log("SOURCE no-directa: " + u);
+            log("SOURCE no-directa [" + x.server + " type=" + x.type +
+                " sandbox=" + x.sandbox + "]: " + u);
         }
     }
 
     return out;
 }
+
+/* ---------- Queries GraphQL ---------- */
 
 var Q_SEARCH =
 'query mySearchItems($query: String!) {' +
@@ -371,27 +348,36 @@ var Q_EPISODE_VIDEOS =
 ' }' +
 '}';
 
+/* ---------- URLs internas ----------
+ *   pp://movie/<slug>
+ *   pp://tvshow/<slug>
+ *   pp://episode/<epId>/<showId>/<season>/<ep>/<slug>
+ */
+
+function episodeUrl(epId, showId, season, number, slug) {
+    return "pp://episode/" +
+        encodeURIComponent(epId) + "/" +
+        encodeURIComponent(showId) + "/" +
+        season + "/" + number + "/" +
+        encodeURIComponent(slug || "");
+}
+
 function parseItemUrl(url) {
     var m;
+    url = String(url || "");
 
-    m = String(url || "").match(/^pp:\/\/movie\/(.+)$/);
+    m = url.match(/^pp:\/\/movie\/(.+)$/);
     if (m) {
-        return {
-            kind: "movie",
-            slug: decodeURIComponent(m[1])
-        };
+        return { kind: "movie", slug: decodeURIComponent(m[1]) };
     }
 
-    m = String(url || "").match(/^pp:\/\/tvshow\/(.+)$/);
+    m = url.match(/^pp:\/\/tvshow\/(.+)$/);
     if (m) {
-        return {
-            kind: "tvshow",
-            slug: decodeURIComponent(m[1])
-        };
+        return { kind: "tvshow", slug: decodeURIComponent(m[1]) };
     }
 
-    m = String(url || "").match(
-        /^pp:\/\/episode\/([^\/]+)\/([^\/]+)\/(\d+)\/(\d+)$/
+    m = url.match(
+        /^pp:\/\/episode\/([^\/]+)\/([^\/]+)\/(\d+)\/(\d+)(?:\/([^\/]*))?$/
     );
 
     if (m) {
@@ -400,15 +386,18 @@ function parseItemUrl(url) {
             episodeId: decodeURIComponent(m[1]),
             showId: decodeURIComponent(m[2]),
             season: parseInt(m[3], 10),
-            episode: parseInt(m[4], 10)
+            episode: parseInt(m[4], 10),
+            slug: m[5] ? decodeURIComponent(m[5]) : ""
         };
     }
 
     return null;
 }
 
+/* ---------- Catálogo ---------- */
+
 function makeCatalogItem(x) {
-    if (!x) return null;
+    if (!x || !x.slug) return null;
 
     var type = x.type || "movie";
     var internal;
@@ -466,14 +455,17 @@ function home() {
     var seen = {};
 
     var lists = [
-        { type: "movie", page: 1, genreSlug: null },
-        { type: "tvshow", page: 1, genreSlug: null }
+        { page: 1, type: "movie", genreSlug: null },
+        { page: 1, type: "tvshow", genreSlug: null }
     ];
 
     for (var k = 0; k < lists.length; k++) {
         var d = gql(Q_LIST, lists[k]);
 
-        if (!d || !d.showList || !d.showList.items) continue;
+        if (!d || !d.showList || !d.showList.items) {
+            log("HOME lista '" + lists[k].type + "' sin items");
+            continue;
+        }
 
         for (var i = 0; i < d.showList.items.length && out.length < 40; i++) {
             var x = d.showList.items[i];
@@ -481,14 +473,18 @@ function home() {
 
             var key = String(x.type) + ":" + String(x.id);
             if (seen[key]) continue;
-
             seen[key] = true;
-            out.push(makeCatalogItem(x));
+
+            var v = makeCatalogItem(x);
+            if (v) out.push(v);
         }
     }
 
+    log("HOME -> " + out.length + " items");
     return out;
 }
+
+/* ---------- Detalles ---------- */
 
 function getShow(slug, type) {
     var d = gql(Q_DETAILS, {
@@ -586,11 +582,7 @@ function detailEpisode(show, ep, season, number) {
         ),
         author: author(),
         uploadDate: 0,
-        url:
-            "pp://episode/" +
-            encodeURIComponent(ep.id) + "/" +
-            encodeURIComponent(show.id) + "/" +
-            season + "/" + number,
+        url: episodeUrl(ep.id, show.id, season, number, show.slug),
         duration: 0,
         viewCount: 0,
         isLive: false,
@@ -637,9 +629,6 @@ function seriesDetails(show, slug) {
 
     desc += nums.length ? nums.join(", ") : "sin datos";
 
-    /*
-     * Carga S1E1 si existe para que la serie tenga una fuente inicial.
-     */
     var sources = [];
 
     if (seasons.length) {
@@ -710,43 +699,13 @@ function recommendations(url) {
                         ep.coverPath || show.coverPath,
                         true
                     ),
-                    "pp://episode/" +
-                        encodeURIComponent(ep.id) + "/" +
-                        encodeURIComponent(show.id) + "/" +
-                        seasonNumber + "/" +
-                        ep.number
+                    episodeUrl(ep.id, show.id, seasonNumber, ep.number, show.slug)
                 )
             );
         }
     }
 
     return out;
-}
-
-function getEpisodeShow(showId) {
-    /*
-     * Fallback para abrir directamente una URL de episodio.
-     * La API de detalles es slug-based, por lo que intentamos localizar
-     * el show mediante la búsqueda disponible.
-     */
-    var d = gql(Q_SEARCH, { query: "" });
-
-    if (!d) return null;
-
-    var groups = [
-        d.movies && d.movies.items ? d.movies.items : [],
-        d.tvshows && d.tvshows.items ? d.tvshows.items : []
-    ];
-
-    for (var i = 0; i < groups.length; i++) {
-        for (var j = 0; j < groups[i].length; j++) {
-            if (String(groups[i][j].id) == String(showId)) {
-                return getShow(groups[i][j].slug, "tvshow");
-            }
-        }
-    }
-
-    return null;
 }
 
 function getDetails(url) {
@@ -776,7 +735,11 @@ function getDetails(url) {
     }
 
     if (p.kind == "episode") {
-        var show2 = getEpisodeShow(p.showId);
+        if (!p.slug) {
+            return errorDetails(url, "URL de episodio sin slug de serie");
+        }
+
+        var show2 = getShow(p.slug, "tvshow");
 
         if (!show2) {
             return errorDetails(url, "No se pudo localizar la serie del episodio");
@@ -822,6 +785,9 @@ function errorDetails(url, msg) {
         thumbnails: new Thumbnails([]),
         author: author(),
         uploadDate: 0,
+        duration: 0,
+        viewCount: 0,
+        isLive: false,
         url: url || WEB,
         video: new VideoSourceDescriptor([]),
         description:
@@ -831,35 +797,42 @@ function errorDetails(url, msg) {
     });
 }
 
+/* ---------- Interfaz de GrayJay ---------- */
+
 if (typeof source !== "undefined") {
 
     source.setSettings = function(s) {
         _settings = s || {};
     };
 
-    source.enable = function(c, s) {
-        _settings = s || {};
+    source.enable = function(conf, settings, savedState) {
+        _settings = settings || {};
     };
 
     source.getSearchCapabilities = function() {
         return {
-            types: [2],
+            types: [Type.Feed.Mixed],
             sorts: [],
             filters: []
         };
     };
 
     source.search = function(query) {
+        resetDebug();
+
+        var items = [];
+
         try {
-            return new VideoPager(
-                search(query || ""),
-                false,
-                null
-            );
+            items = search(query || "");
         } catch (e) {
             log("SEARCH exception: " + String(e));
-            return new VideoPager([], false, null);
         }
+
+        if (!items.length && DEBUG_THROW) {
+            throw new ScriptException("Búsqueda vacía. " + _debug);
+        }
+
+        return new VideoPager(items, false, null);
     };
 
     source.searchSuggestions = function(query) {
@@ -867,16 +840,21 @@ if (typeof source !== "undefined") {
     };
 
     source.getHome = function() {
+        resetDebug();
+
+        var items = [];
+
         try {
-            return new VideoPager(
-                home(),
-                false,
-                null
-            );
+            items = home();
         } catch (e) {
             log("HOME exception: " + String(e));
-            return new VideoPager([], false, null);
         }
+
+        if (!items.length && DEBUG_THROW) {
+            throw new ScriptException("Home vacío. " + _debug);
+        }
+
+        return new VideoPager(items, false, null);
     };
 
     source.isChannelUrl = function(url) {
