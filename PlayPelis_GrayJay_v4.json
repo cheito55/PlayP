@@ -1,20 +1,17 @@
 {
-  "name": "PlayPelis ESPlay GraphQL",
-  "description": "PlayPelis para GrayJay usando el backend GraphQL ESPlay y fuentes de vídeo expuestas por el backend.",
+  "name": "PlayPelis Scraper",
+  "description": "PlayPelis para GrayJay: búsqueda, carátulas, detalles, episodios y fuentes directas leyendo el HTML de pelisplushd.",
   "author": "cheito55",
   "authorUrl": "https://github.com/cheito55",
-  "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_EsPlay_GraphQL_GrayJay_v4.json",
+  "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
-  "scriptUrl": "./PlayPelis_EsPlay_GraphQL_GrayJay_v4.js",
-  "version": 3,
+  "scriptUrl": "./PlayPelis_GrayJay_v4.js",
+  "version": 5,
   "iconUrl": "",
   "id": "c1d7a4e2-8f36-4b90-a125-63e9d7f10482",
   "scriptSignature": "",
   "scriptPublicKey": "",
-  "packages": [
-    "Http",
-    "Utilities"
-  ],
+  "packages": ["Http", "Utilities"],
   "allowEval": false,
   "allowUrls": [
     "pelisplushd.nu",
