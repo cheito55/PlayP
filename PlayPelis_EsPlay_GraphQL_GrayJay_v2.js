@@ -1,27 +1,21 @@
 /*
- * PlayPelis / EsPlay GraphQL - GrayJay Source v2
- * API recovered from PlayPelis 1.4.8 APK.
+ * PlayPelis / ESPlay GraphQL - GrayJay Source v3
+ * ES5 compatible.
  *
- * Backend:
- *   https://api.esplay.one/graphql
+ * Flujo:
+ *   GrayJay -> GraphQL -> catálogo/títulos -> carátulas -> detalles
+ *           -> videoLinks/queryVideos -> fuentes HLS/MP4
  *
- * Web/catalog:
- *   https://pelisplus2.ai
- *
- * Covers:
- *   https://static.esplay.one/{movie|tvshow}/cover/original/{coverPath}
- *
- * GraphQL operations recovered from the APK:
- *   - showSearch
- *   - showList
- *   - show
- *   - seasonList
- *   - seasonEpisodesList
- *   - videoLinks
- *   - videos
- *
- * This source talks directly to the GraphQL backend recovered from the APK.
- * It does not bypass provider protections or scrape arbitrary third-party pages.
+ * v3:
+ * - POST compatible con las variantes http.POST/http.post de GrayJay.
+ * - Mejor diagnóstico HTTP/GraphQL.
+ * - Carátulas: URL completa, rutas relativas y variantes de portada.
+ * - Búsqueda separada de películas y series.
+ * - Detalles y episodios.
+ * - Acepta HLS aunque la URL tenga query-string y fuentes marcadas
+ *   explícitamente como hls/m3u8/mp4.
+ * - Solo devuelve como reproductor URLs de medios directos; no inventa
+ *   enlaces cuando ESPlay devuelve un embed no reproducible.
  */
 
 var PID = "f8c3b1e7-6a42-4d9e-b205-71c8a4f9306d";
@@ -31,12 +25,13 @@ var PPID = new PlatformID(PLATFORM, PLATFORM, PID);
 var API = "https://api.esplay.one/graphql";
 var WEB = "https://pelisplus2.ai";
 var STATIC = "https://static.esplay.one";
+
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
 var _settings = {};
 var _debug = "";
 
-var MAX_SOURCES = 12;
+var MAX_SOURCES = 16;
 var MAX_SEARCH = 40;
 var MAX_EPISODES = 500;
 var MAX_SEASONS = 50;
@@ -45,31 +40,85 @@ function log(s) {
     _debug += String(s) + "\n";
 }
 
+function resetDebug() {
+    _debug = "";
+}
+
+function cleanUrl(s) {
+    if (!s) return "";
+    return String(s)
+        .replace(/\\u0026/g, "&")
+        .replace(/\\\//g, "/")
+        .replace(/&amp;/g, "&")
+        .trim();
+}
+
+/*
+ * GrayJay installations have appeared with both POST spellings.
+ * Try the common uppercase form first, then lowercase.
+ */
 function httpPostJson(url, obj) {
+    var body = JSON.stringify(obj);
+    var headers = {
+        "User-Agent": UA,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Origin": WEB,
+        "Referer": WEB + "/"
+    };
+
+    var r = null;
+    var lastError = "";
+
     try {
-        var body = JSON.stringify(obj);
-        var r = http.POST(
-            url,
-            body,
-            {
-                "User-Agent": UA,
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Origin": WEB,
-                "Referer": WEB + "/"
-            },
-            false,
-            false
-        );
-
-        if (!r || !r.body) {
-            log("POST vacío: " + url);
-            return null;
+        if (typeof http !== "undefined" && typeof http.POST === "function") {
+            r = http.POST(url, body, headers);
         }
+    } catch (e1) {
+        lastError = String(e1);
+    }
 
-        return JSON.parse(r.body);
-    } catch (e) {
-        log("POST exception: " + String(e));
+    if (!r) {
+        try {
+            if (typeof http !== "undefined" && typeof http.post === "function") {
+                r = http.post(url, body, headers);
+            }
+        } catch (e2) {
+            lastError = String(e2);
+        }
+    }
+
+    if (!r) {
+        log("HTTP POST sin respuesta: " + lastError);
+        return null;
+    }
+
+    var text = "";
+
+    try {
+        if (typeof r === "string") {
+            text = r;
+        } else if (r.body != null) {
+            text = String(r.body);
+        } else if (r.data != null && typeof r.data === "string") {
+            text = r.data;
+        } else {
+            text = JSON.stringify(r);
+        }
+    } catch (e3) {
+        log("No se pudo leer respuesta HTTP: " + String(e3));
+        return null;
+    }
+
+    if (!text) {
+        log("Respuesta vacía de " + url);
+        return null;
+    }
+
+    try {
+        return JSON.parse(text);
+    } catch (e4) {
+        log("JSON inválido: " + text.substring(0, 500));
         return null;
     }
 }
@@ -87,40 +136,80 @@ function gql(query, variables) {
         return null;
     }
 
-    return r.data || null;
+    if (!r.data) {
+        log("GraphQL sin data: " + JSON.stringify(r).substring(0, 1000));
+        return null;
+    }
+
+    return r.data;
 }
 
-function esc(s) {
-    return String(s == null ? "" : s);
-}
+/*
+ * Carátulas:
+ * 1) Si la API ya entrega http(s), se usa directamente.
+ * 2) Se prueban varias rutas conocidas para que GrayJay tenga alternativas.
+ *    No se consulta una página HTML para obtener imágenes.
+ */
+function coverCandidates(type, path, small) {
+    var out = [];
+    var seen = {};
+    var p = cleanUrl(path);
 
-function cleanUrl(s) {
-    if (!s) return "";
-    return String(s)
-        .replace(/\\u0026/g, "&")
-        .replace(/\\\//g, "/")
-        .replace(/&amp;/g, "&")
-        .trim();
+    if (!p) return out;
+
+    function add(u) {
+        u = cleanUrl(u);
+        if (!u || seen[u]) return;
+        seen[u] = true;
+        out.push(u);
+    }
+
+    if (/^https?:\/\//i.test(p)) {
+        add(p);
+        return out;
+    }
+
+    p = p.replace(/^\/+/, "");
+
+    if (small) {
+        add(STATIC + "/" + type + "/episode/small/" + p);
+        add(STATIC + "/" + type + "/cover/small/" + p);
+    }
+
+    add(STATIC + "/" + type + "/cover/original/" + p);
+    add(STATIC + "/" + type + "/cover/small/" + p);
+
+    /*
+     * Si coverPath ya viene con una parte de la ruta, evita duplicarla.
+     */
+    if (p.indexOf(type + "/") === 0) {
+        add(STATIC + "/" + p);
+    }
+
+    return out;
 }
 
 function cover(type, path, small) {
-    if (!path) return "";
-    var p = String(path).replace(/^\/+/, "");
-
-    if (/^https?:\/\//i.test(p)) {
-        return p;
-    }
-
-    if (small) {
-        return STATIC + "/" + type + "/episode/small/" + p;
-    }
-
-    return STATIC + "/" + type + "/cover/original/" + p;
+    var a = coverCandidates(type, path, small);
+    return a.length ? a[0] : "";
 }
 
-function thumb(url) {
-    if (!url) return new Thumbnails([]);
-    return new Thumbnails([new Thumbnail(url, 100)]);
+function thumb(urls) {
+    var arr = [];
+
+    if (!urls) return new Thumbnails([]);
+
+    if (typeof urls === "string") {
+        urls = [urls];
+    }
+
+    for (var i = 0; i < urls.length && arr.length < 5; i++) {
+        if (urls[i]) {
+            arr.push(new Thumbnail(urls[i], 100));
+        }
+    }
+
+    return new Thumbnails(arr);
 }
 
 function author() {
@@ -133,11 +222,11 @@ function author() {
     );
 }
 
-function video(id, title, image, url) {
+function makeVideo(id, title, images, url) {
     return new PlatformVideo({
         id: new PlatformID(PLATFORM, String(id), PID),
         name: title || "Sin título",
-        thumbnails: thumb(image),
+        thumbnails: thumb(images),
         author: author(),
         uploadDate: 0,
         url: url,
@@ -147,55 +236,65 @@ function video(id, title, image, url) {
     });
 }
 
-function hls(url, name, duration) {
-    url = cleanUrl(url);
-    if (!url) return null;
+function isHls(url, item) {
+    var u = String(url || "").toLowerCase();
+    var t = item && item.type ? String(item.type).toLowerCase() : "";
 
-    if (/\.m3u8(?:[?#]|$)/i.test(url)) {
+    return u.indexOf(".m3u8") >= 0 ||
+        u.indexOf("m3u8") >= 0 ||
+        t == "hls" ||
+        t == "m3u8";
+}
+
+function isMp4(url, item) {
+    var u = String(url || "").toLowerCase();
+    var t = item && item.type ? String(item.type).toLowerCase() : "";
+
+    return /\.mp4(?:[?#]|$)/i.test(u) ||
+        t == "mp4" ||
+        t == "video/mp4";
+}
+
+function mediaSource(item) {
+    if (!item || !item.url) return null;
+
+    var u = cleanUrl(item.url);
+    if (!/^https?:\/\//i.test(u)) return null;
+
+    var label =
+        (item.server ? String(item.server) : "Servidor") +
+        (item.quality ? " [" + String(item.quality) + "]" : "") +
+        (item.language ? " [" + String(item.language) + "]" : "");
+
+    if (isHls(u, item)) {
         return new HLSSource({
-            name: name || "HLS",
-            url: url,
-            duration: duration || 0
+            name: label || "HLS",
+            url: u,
+            duration: 0
         });
     }
 
-    return null;
-}
-
-function directSource(url, name, duration) {
-    url = cleanUrl(url);
-    if (!url) return null;
-
-    if (/\.m3u8(?:[?#]|$)/i.test(url)) {
-        return hls(url, name, duration);
-    }
-
-    if (/\.mp4(?:[?#]|$)/i.test(url)) {
+    if (isMp4(u, item)) {
         return new VideoUrlSource({
             width: 0,
             height: 0,
             container: "mp4",
             codec: "",
-            name: name || "MP4",
+            name: label || "MP4",
             bitrate: 0,
-            duration: duration || 0,
-            url: url
+            duration: 0,
+            url: u
         });
     }
 
-    /*
-     * Some providers return an embed/deep-link rather than the final
-     * manifest. Keep it as a URL only when it is already a media URL.
-     * We deliberately do not scrape arbitrary provider pages here.
-     */
     return null;
 }
 
 function sourceList(items) {
     var out = [];
-    if (!items) return out;
-
     var seen = {};
+
+    if (!items) return out;
 
     for (var i = 0; i < items.length && out.length < MAX_SOURCES; i++) {
         var x = items[i];
@@ -205,22 +304,13 @@ function sourceList(items) {
         if (!u || seen[u]) continue;
         seen[u] = true;
 
-        var label =
-            (x.server ? String(x.server) : "Servidor") +
-            (x.quality ? " [" + String(x.quality) + "]" : "") +
-            (x.language ? " [" + String(x.language) + "]" : "");
-
-        var src = directSource(
-            u,
-            label,
-            0
-        );
+        var src = mediaSource(x);
 
         if (src) {
             out.push(src);
-            log("SOURCE OK: " + label + " -> " + u);
+            log("SOURCE OK: " + u);
         } else {
-            log("SOURCE no-directa: " + label + " -> " + u);
+            log("SOURCE no-directa: " + u);
         }
     }
 
@@ -229,96 +319,90 @@ function sourceList(items) {
 
 var Q_SEARCH =
 'query mySearchItems($query: String!) {' +
-'  movies: showSearch(query: $query, type: "movie", limit: 20) {' +
-'    totalCount items { id title slug coverPath year overview type quality { type language } }' +
-'  }' +
-'  tvshows: showSearch(query: $query, type: "tvshow", limit: 20) {' +
-'    totalCount items { id title slug coverPath year overview type quality { type language } }' +
-'  }' +
+' movies: showSearch(query: $query, type: "movie", limit: 20) {' +
+'  totalCount items { id title originalTitle slug coverPath year overview type }' +
+' }' +
+' tvshows: showSearch(query: $query, type: "tvshow", limit: 20) {' +
+'  totalCount items { id title originalTitle slug coverPath year overview type }' +
+' }' +
 '}';
 
 var Q_LIST =
 'query myShowListPage($page: Int!, $type: String!, $genreSlug: String) {' +
-'  showList(page: $page, type: $type, limit: 20, genreSlug: $genreSlug) {' +
-'    totalCount items {' +
-'      id title slug coverPath year overview type quality { type language }' +
-'    }' +
-'  }' +
+' showList(page: $page, type: $type, limit: 20, genreSlug: $genreSlug) {' +
+'  totalCount items { id title originalTitle slug coverPath year overview type }' +
+' }' +
 '}';
 
 var Q_DETAILS =
 'query showItem($type: String!, $slug: String!) {' +
-'  show(type: $type, slug: $slug) {' +
-'    id title originalTitle type coverPath duration overview popularity slug year' +
-'    quality { type language } genres { id slug name } country { name } cast { name }' +
-'  }' +
+' show(type: $type, slug: $slug) {' +
+'  id title originalTitle type coverPath duration overview popularity slug year' +
+'  quality { type language } genres { id slug name } country { name } cast { name }' +
+' }' +
 '}';
 
 var Q_SEASONS =
 'query getSeason($showId: String!) {' +
-'  seasonList(showId: $showId, limit: 500, page: 1) {' +
-'    totalCount items { episodeCount number }' +
-'  }' +
+' seasonList(showId: $showId, limit: 500, page: 1) {' +
+'  totalCount items { episodeCount number }' +
+' }' +
 '}';
 
 var Q_EPISODES =
 'query season($showId: String!, $seasonNumber: Int!, $limit: Int, $page: Int) {' +
-'  seasonEpisodesList(showId: $showId, number: $seasonNumber, limit: $limit, page: $page) {' +
-'    totalCount season { title slug }' +
-'    items { id title slug number overview coverPath releaseDate }' +
-'  }' +
+' seasonEpisodesList(showId: $showId, number: $seasonNumber, limit: $limit, page: $page) {' +
+'  totalCount season { title slug }' +
+'  items { id title slug number overview coverPath releaseDate }' +
+' }' +
 '}';
 
 var Q_MOVIE_LINKS =
 'query videoLinks($itemId: String!) {' +
-'  links(itemId: $itemId) {' +
-'    mirrors { language url quality sandbox type server updatedAt status }' +
-'  }' +
+' links(itemId: $itemId) {' +
+'  mirrors { language url quality sandbox type server updatedAt status }' +
+' }' +
 '}';
 
 var Q_EPISODE_VIDEOS =
 'query queryVideos($itemId: String!) {' +
-'  videos(itemId: $itemId) {' +
-'    language url quality sandbox type server updatedAt status' +
-'  }' +
+' videos(itemId: $itemId) {' +
+'  language url quality sandbox type server updatedAt status' +
+' }' +
 '}';
 
-function itemTypeFromUrl(url) {
-    return url.indexOf("/movie/") >= 0 ? "movie" : "tvshow";
-}
-
 function parseItemUrl(url) {
-    /*
-     * Internal format:
-     *   pp://movie/<slug>
-     *   pp://tvshow/<slug>
-     *   pp://episode/<episodeId>/<showId>/<season>/<episode>
-     */
     var m;
 
     m = String(url || "").match(/^pp:\/\/movie\/(.+)$/);
-    if (m) return {
-        kind: "movie",
-        slug: decodeURIComponent(m[1])
-    };
+    if (m) {
+        return {
+            kind: "movie",
+            slug: decodeURIComponent(m[1])
+        };
+    }
 
     m = String(url || "").match(/^pp:\/\/tvshow\/(.+)$/);
-    if (m) return {
-        kind: "tvshow",
-        slug: decodeURIComponent(m[1])
-    };
+    if (m) {
+        return {
+            kind: "tvshow",
+            slug: decodeURIComponent(m[1])
+        };
+    }
 
     m = String(url || "").match(
         /^pp:\/\/episode\/([^\/]+)\/([^\/]+)\/(\d+)\/(\d+)$/
     );
 
-    if (m) return {
-        kind: "episode",
-        episodeId: m[1],
-        showId: m[2],
-        season: parseInt(m[3], 10),
-        episode: parseInt(m[4], 10)
-    };
+    if (m) {
+        return {
+            kind: "episode",
+            episodeId: decodeURIComponent(m[1]),
+            showId: decodeURIComponent(m[2]),
+            season: parseInt(m[3], 10),
+            episode: parseInt(m[4], 10)
+        };
+    }
 
     return null;
 }
@@ -327,21 +411,28 @@ function makeCatalogItem(x) {
     if (!x) return null;
 
     var type = x.type || "movie";
-    var internal =
-        type == "movie"
-            ? "pp://movie/" + encodeURIComponent(x.slug)
-            : "pp://tvshow/" + encodeURIComponent(x.slug);
+    var internal;
 
-    return video(
+    if (type == "movie") {
+        internal = "pp://movie/" + encodeURIComponent(x.slug);
+    } else {
+        internal = "pp://tvshow/" + encodeURIComponent(x.slug);
+    }
+
+    return makeVideo(
         type + "_" + x.id,
-        x.title || "Sin título",
-        cover(type, x.coverPath, false),
+        x.title || x.originalTitle || "Sin título",
+        coverCandidates(type, x.coverPath, false),
         internal
     );
 }
 
 function search(query) {
-    var d = gql(Q_SEARCH, { query: String(query || "").trim() });
+    var q = String(query || "").trim();
+
+    if (!q) return [];
+
+    var d = gql(Q_SEARCH, { query: q });
     if (!d) return [];
 
     var out = [];
@@ -355,14 +446,18 @@ function search(query) {
     for (var g = 0; g < groups.length; g++) {
         for (var i = 0; i < groups[g].length && out.length < MAX_SEARCH; i++) {
             var x = groups[g][i];
-            if (!x || seen[x.type + ":" + x.id]) continue;
-            seen[x.type + ":" + x.id] = true;
+            if (!x) continue;
+
+            var key = String(x.type || "") + ":" + String(x.id || x.slug || "");
+            if (seen[key]) continue;
+            seen[key] = true;
 
             var v = makeCatalogItem(x);
             if (v) out.push(v);
         }
     }
 
+    log("SEARCH '" + q + "' -> " + out.length + " resultados");
     return out;
 }
 
@@ -377,51 +472,60 @@ function home() {
 
     for (var k = 0; k < lists.length; k++) {
         var d = gql(Q_LIST, lists[k]);
+
         if (!d || !d.showList || !d.showList.items) continue;
 
         for (var i = 0; i < d.showList.items.length && out.length < 40; i++) {
             var x = d.showList.items[i];
+            if (!x) continue;
+
             var key = String(x.type) + ":" + String(x.id);
             if (seen[key]) continue;
-            seen[key] = true;
 
-            var v = makeCatalogItem(x);
-            if (v) out.push(v);
+            seen[key] = true;
+            out.push(makeCatalogItem(x));
         }
     }
 
     return out;
 }
 
-function detailForMovie(x, slug) {
+function getShow(slug, type) {
+    var d = gql(Q_DETAILS, {
+        type: type,
+        slug: slug
+    });
+
+    return d && d.show ? d.show : null;
+}
+
+function movieDetails(x, slug) {
+    var sourcesData = gql(Q_MOVIE_LINKS, {
+        itemId: String(x.id)
+    });
+
+    var mirrors =
+        sourcesData &&
+        sourcesData.links &&
+        sourcesData.links.mirrors
+            ? sourcesData.links.mirrors
+            : [];
+
+    var sources = sourceList(mirrors);
+
     var desc = x.overview || "";
 
     if (x.originalTitle && x.originalTitle != x.title) {
         desc += "\n\nTítulo original: " + x.originalTitle;
     }
 
-    if (x.year) desc += "\nAño: " + x.year;
-
-    if (x.genres && x.genres.length) {
-        var gs = [];
-        for (var i = 0; i < x.genres.length; i++) {
-            gs.push(x.genres[i].name);
-        }
-        desc += "\nGéneros: " + gs.join(", ");
+    if (x.year) {
+        desc += "\nAño: " + x.year;
     }
 
-    var d = gql(Q_MOVIE_LINKS, { itemId: String(x.id) });
-    var mirrors =
-        d && d.links && d.links.mirrors
-            ? d.links.mirrors
-            : [];
-
-    var sources = sourceList(mirrors);
-
     desc +=
-        "\n\nAPI: GraphQL / videoLinks" +
-        "\nMirrors recibidos: " + mirrors.length +
-        "\nFuentes directas utilizables: " + sources.length;
+        "\n\nMirrors recibidos: " + mirrors.length +
+        "\nFuentes reproducibles: " + sources.length;
 
     if (_debug) {
         desc += "\n\n=== DEBUG ===\n" + _debug;
@@ -429,8 +533,8 @@ function detailForMovie(x, slug) {
 
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, "movie_" + x.id, PID),
-        name: x.title || "Sin título",
-        thumbnails: thumb(cover("movie", x.coverPath, false)),
+        name: x.title || x.originalTitle || "Película",
+        thumbnails: thumb(coverCandidates("movie", x.coverPath, false)),
         author: author(),
         uploadDate: 0,
         url: "pp://movie/" + encodeURIComponent(slug),
@@ -442,50 +546,43 @@ function detailForMovie(x, slug) {
     });
 }
 
-function episodeSources(episodeId) {
+function episodeSources(id) {
     var d = gql(Q_EPISODE_VIDEOS, {
-        itemId: String(episodeId)
+        itemId: String(id)
     });
 
     var videos = d && d.videos ? d.videos : [];
+
     return {
         raw: videos,
         sources: sourceList(videos)
     };
 }
 
-function detailForEpisode(show, ep, season, number) {
+function detailEpisode(show, ep, season, number) {
     var r = episodeSources(ep.id);
+
     var desc =
         (show.overview || "") +
         "\n\nTemporada " + season +
         " · Episodio " + number +
-        "\n" + (ep.title || "");
-
-    if (ep.overview) desc += "\n\n" + ep.overview;
-
-    desc +=
-        "\n\nAPI: GraphQL / queryVideos" +
-        "\nVideos recibidos: " + r.raw.length +
-        "\nFuentes directas utilizables: " + r.sources.length;
+        "\n" + (ep.title || "") +
+        "\n\nVideos recibidos: " + r.raw.length +
+        "\nFuentes reproducibles: " + r.sources.length;
 
     if (_debug) {
         desc += "\n\n=== DEBUG ===\n" + _debug;
     }
 
     return new PlatformVideoDetails({
-        id: new PlatformID(
-            PLATFORM,
-            "episode_" + ep.id,
-            PID
-        ),
+        id: new PlatformID(PLATFORM, "episode_" + ep.id, PID),
         name:
             (show.title || "Serie") +
             " S" + season +
             "E" + number +
-            " - " + (ep.title || ""),
+            (ep.title ? " - " + ep.title : ""),
         thumbnails: thumb(
-            cover("tvshow", show.coverPath, false)
+            coverCandidates("tvshow", show.coverPath, false)
         ),
         author: author(),
         uploadDate: 0,
@@ -502,234 +599,117 @@ function detailForEpisode(show, ep, season, number) {
     });
 }
 
-function getShow(slug, type) {
-    var d = gql(Q_DETAILS, {
-        type: type,
-        slug: slug
+function seasonsFor(showId) {
+    var d = gql(Q_SEASONS, {
+        showId: String(showId)
     });
 
-    return d && d.show ? d.show : null;
+    return d && d.seasonList && d.seasonList.items
+        ? d.seasonList.items
+        : [];
 }
 
-function getDetails(url) {
-    _debug = "";
+function episodesFor(showId, season) {
+    var d = gql(Q_EPISODES, {
+        showId: String(showId),
+        seasonNumber: parseInt(season, 10),
+        limit: MAX_EPISODES,
+        page: 1
+    });
 
-    var p = parseItemUrl(url);
-    if (!p) return null;
+    return d &&
+        d.seasonEpisodesList &&
+        d.seasonEpisodesList.items
+        ? d.seasonEpisodesList.items
+        : [];
+}
 
-    if (p.kind == "movie") {
-        var movie = getShow(p.slug, "movie");
-        if (!movie) return errorDetails(url, "Película no encontrada");
-        return detailForMovie(movie, p.slug);
+function seriesDetails(show, slug) {
+    var seasons = seasonsFor(show.id);
+    var desc = show.overview || "";
+
+    desc += "\n\nTemporadas: ";
+
+    var nums = [];
+    for (var i = 0; i < seasons.length && i < MAX_SEASONS; i++) {
+        nums.push(String(seasons[i].number));
     }
 
-    if (p.kind == "tvshow") {
-        var show = getShow(p.slug, "tvshow");
-        if (!show) return errorDetails(url, "Serie no encontrada");
+    desc += nums.length ? nums.join(", ") : "sin datos";
 
-        var desc = show.overview || "";
-        desc += "\n\nTemporadas: ";
+    /*
+     * Carga S1E1 si existe para que la serie tenga una fuente inicial.
+     */
+    var sources = [];
 
-        var sd = gql(Q_SEASONS, { showId: String(show.id) });
-        var seasons =
-            sd && sd.seasonList && sd.seasonList.items
-                ? sd.seasonList.items
-                : [];
+    if (seasons.length) {
+        var eps = episodesFor(show.id, seasons[0].number);
 
-        var nums = [];
-        for (var i = 0; i < seasons.length && i < MAX_SEASONS; i++) {
-            nums.push(String(seasons[i].number));
-        }
+        if (eps.length) {
+            var r = episodeSources(eps[0].id);
+            sources = r.sources;
 
-        desc += nums.length ? nums.join(", ") : "sin datos";
-
-        /*
-         * GrayJay can load the episode list through recommendations.
-         * To make the series immediately playable, resolve S1E1 when it exists.
-         */
-        var first = null;
-        if (seasons.length) {
-            var firstSeason = seasons[0].number;
-            var ed = gql(Q_EPISODES, {
-                showId: String(show.id),
-                seasonNumber: parseInt(firstSeason, 10),
-                limit: MAX_EPISODES,
-                page: 1
-            });
-
-            var eps =
-                ed && ed.seasonEpisodesList &&
-                ed.seasonEpisodesList.items
-                    ? ed.seasonEpisodesList.items
-                    : [];
-
-            if (eps.length) {
-                first = {
-                    ep: eps[0],
-                    season: firstSeason,
-                    number: eps[0].number
-                };
-            }
-        }
-
-        var sources = [];
-        if (first) {
-            var er = episodeSources(first.ep.id);
-            sources = er.sources;
             desc +=
-                "\n\nReproduciendo por defecto: T" +
-                first.season + "E" +
-                first.number +
-                "\nFuentes directas: " +
+                "\n\nPrimera fuente: S" +
+                seasons[0].number +
+                "E" +
+                eps[0].number +
+                "\nFuentes reproducibles: " +
                 sources.length;
         }
-
-        if (_debug) desc += "\n\n=== DEBUG ===\n" + _debug;
-
-        return new PlatformVideoDetails({
-            id: new PlatformID(PLATFORM, "tv_" + show.id, PID),
-            name: show.title || "Serie",
-            thumbnails: thumb(
-                cover("tvshow", show.coverPath, false)
-            ),
-            author: author(),
-            uploadDate: 0,
-            duration: 0,
-            viewCount: 0,
-            isLive: false,
-            url: "pp://tvshow/" + encodeURIComponent(p.slug),
-            video: new VideoSourceDescriptor(sources),
-            description: desc
-        });
     }
 
-    if (p.kind == "episode") {
-        var show2 = getShowById(p.showId);
-        if (!show2) {
-            return errorDetails(url, "Serie no encontrada");
-        }
-
-        var ed2 = gql(Q_EPISODES, {
-            showId: String(p.showId),
-            seasonNumber: p.season,
-            limit: MAX_EPISODES,
-            page: 1
-        });
-
-        var eps2 =
-            ed2 && ed2.seasonEpisodesList &&
-            ed2.seasonEpisodesList.items
-                ? ed2.seasonEpisodesList.items
-                : [];
-
-        var target = null;
-        for (var j = 0; j < eps2.length; j++) {
-            if (String(eps2[j].id) == String(p.episodeId)) {
-                target = eps2[j];
-                break;
-            }
-            if (parseInt(eps2[j].number, 10) == p.episode) {
-                target = eps2[j];
-            }
-        }
-
-        if (!target) {
-            return errorDetails(url, "Episodio no encontrado");
-        }
-
-        return detailForEpisode(
-            show2,
-            target,
-            p.season,
-            p.episode
-        );
+    if (_debug) {
+        desc += "\n\n=== DEBUG ===\n" + _debug;
     }
 
-    return null;
-}
-
-function getShowById(id) {
-    /*
-     * The API's show() query is slug based. For episode details we
-     * therefore discover the show through a small search only when
-     * the caller opened an episode URL directly.
-     */
-    var d = gql(Q_SEARCH, { query: "" });
-    /*
-     * Empty search is not guaranteed to work. Prefer the episode's
-     * cover/title path when available; if this fails, recommendations
-     * still expose playable episode URLs.
-     */
-    if (!d) return null;
-
-    var groups = [
-        d.movies && d.movies.items ? d.movies.items : [],
-        d.tvshows && d.tvshows.items ? d.tvshows.items : []
-    ];
-
-    for (var i = 0; i < groups.length; i++) {
-        for (var j = 0; j < groups[i].length; j++) {
-            if (String(groups[i][j].id) == String(id)) {
-                return getShow(
-                    groups[i][j].slug,
-                    "tvshow"
-                );
-            }
-        }
-    }
-
-    return null;
+    return new PlatformVideoDetails({
+        id: new PlatformID(PLATFORM, "tv_" + show.id, PID),
+        name: show.title || "Serie",
+        thumbnails: thumb(
+            coverCandidates("tvshow", show.coverPath, false)
+        ),
+        author: author(),
+        uploadDate: 0,
+        url: "pp://tvshow/" + encodeURIComponent(slug),
+        duration: 0,
+        viewCount: 0,
+        isLive: false,
+        video: new VideoSourceDescriptor(sources),
+        description: desc
+    });
 }
 
 function recommendations(url) {
     var p = parseItemUrl(url);
+
     if (!p || p.kind != "tvshow") return [];
 
     var show = getShow(p.slug, "tvshow");
     if (!show) return [];
 
-    var sd = gql(Q_SEASONS, {
-        showId: String(show.id)
-    });
-
-    var seasons =
-        sd && sd.seasonList && sd.seasonList.items
-            ? sd.seasonList.items
-            : [];
-
+    var seasons = seasonsFor(show.id);
     var out = [];
 
-    for (var s = 0; s < seasons.length; s++) {
-        if (out.length >= MAX_EPISODES) break;
-
-        var seasonNumber =
-            parseInt(seasons[s].number, 10);
-
-        var ed = gql(Q_EPISODES, {
-            showId: String(show.id),
-            seasonNumber: seasonNumber,
-            limit: MAX_EPISODES,
-            page: 1
-        });
-
-        var eps =
-            ed && ed.seasonEpisodesList &&
-            ed.seasonEpisodesList.items
-                ? ed.seasonEpisodesList.items
-                : [];
+    for (var s = 0; s < seasons.length && out.length < MAX_EPISODES; s++) {
+        var seasonNumber = parseInt(seasons[s].number, 10);
+        var eps = episodesFor(show.id, seasonNumber);
 
         for (var e = 0; e < eps.length && out.length < MAX_EPISODES; e++) {
             var ep = eps[e];
 
             out.push(
-                video(
+                makeVideo(
                     "episode_" + ep.id,
                     (show.title || "Serie") +
                         " S" + seasonNumber +
                         "E" + ep.number +
                         (ep.title ? " - " + ep.title : ""),
-                    cover("tvshow", ep.coverPath, true) ||
-                        cover("tvshow", show.coverPath, false),
+                    coverCandidates(
+                        "tvshow",
+                        ep.coverPath || show.coverPath,
+                        true
+                    ),
                     "pp://episode/" +
                         encodeURIComponent(ep.id) + "/" +
                         encodeURIComponent(show.id) + "/" +
@@ -743,21 +723,110 @@ function recommendations(url) {
     return out;
 }
 
+function getEpisodeShow(showId) {
+    /*
+     * Fallback para abrir directamente una URL de episodio.
+     * La API de detalles es slug-based, por lo que intentamos localizar
+     * el show mediante la búsqueda disponible.
+     */
+    var d = gql(Q_SEARCH, { query: "" });
+
+    if (!d) return null;
+
+    var groups = [
+        d.movies && d.movies.items ? d.movies.items : [],
+        d.tvshows && d.tvshows.items ? d.tvshows.items : []
+    ];
+
+    for (var i = 0; i < groups.length; i++) {
+        for (var j = 0; j < groups[i].length; j++) {
+            if (String(groups[i][j].id) == String(showId)) {
+                return getShow(groups[i][j].slug, "tvshow");
+            }
+        }
+    }
+
+    return null;
+}
+
+function getDetails(url) {
+    resetDebug();
+
+    var p = parseItemUrl(url);
+    if (!p) return null;
+
+    if (p.kind == "movie") {
+        var movie = getShow(p.slug, "movie");
+
+        if (!movie) {
+            return errorDetails(url, "Película no encontrada");
+        }
+
+        return movieDetails(movie, p.slug);
+    }
+
+    if (p.kind == "tvshow") {
+        var show = getShow(p.slug, "tvshow");
+
+        if (!show) {
+            return errorDetails(url, "Serie no encontrada");
+        }
+
+        return seriesDetails(show, p.slug);
+    }
+
+    if (p.kind == "episode") {
+        var show2 = getEpisodeShow(p.showId);
+
+        if (!show2) {
+            return errorDetails(url, "No se pudo localizar la serie del episodio");
+        }
+
+        var eps = episodesFor(p.showId, p.season);
+        var target = null;
+
+        for (var i = 0; i < eps.length; i++) {
+            if (String(eps[i].id) == String(p.episodeId)) {
+                target = eps[i];
+                break;
+            }
+
+            if (parseInt(eps[i].number, 10) == p.episode) {
+                target = eps[i];
+            }
+        }
+
+        if (!target) {
+            return errorDetails(url, "Episodio no encontrado");
+        }
+
+        return detailEpisode(
+            show2,
+            target,
+            p.season,
+            p.episode
+        );
+    }
+
+    return null;
+}
+
 function errorDetails(url, msg) {
     return new PlatformVideoDetails({
-        id: new PlatformID(PLATFORM, "error_" + String(url), PID),
+        id: new PlatformID(
+            PLATFORM,
+            "error_" + String(url),
+            PID
+        ),
         name: "PlayPelis - " + msg,
         thumbnails: new Thumbnails([]),
         author: author(),
         uploadDate: 0,
-        duration: 0,
-        viewCount: 0,
-        isLive: false,
         url: url || WEB,
         video: new VideoSourceDescriptor([]),
         description:
             msg +
-            "\n\nGraphQL: " + API +
+            "\n\nAPI: " + API +
             (_debug ? "\n\n=== DEBUG ===\n" + _debug : "")
     });
 }
@@ -788,6 +857,7 @@ if (typeof source !== "undefined") {
                 null
             );
         } catch (e) {
+            log("SEARCH exception: " + String(e));
             return new VideoPager([], false, null);
         }
     };
@@ -804,6 +874,7 @@ if (typeof source !== "undefined") {
                 null
             );
         } catch (e) {
+            log("HOME exception: " + String(e));
             return new VideoPager([], false, null);
         }
     };
@@ -815,11 +886,9 @@ if (typeof source !== "undefined") {
     source.isContentDetailsUrl = function(url) {
         if (!url) return false;
 
-        return (
-            String(url).indexOf("pp://movie/") === 0 ||
+        return String(url).indexOf("pp://movie/") === 0 ||
             String(url).indexOf("pp://tvshow/") === 0 ||
-            String(url).indexOf("pp://episode/") === 0
-        );
+            String(url).indexOf("pp://episode/") === 0;
     };
 
     source.isVideoDetailsUrl = function(url) {
@@ -833,10 +902,15 @@ if (typeof source !== "undefined") {
     source.getContentDetails = function(url) {
         try {
             var d = getDetails(url);
+
             if (d) return d;
-            return errorDetails(url, "No se pudo obtener el contenido");
+
+            return errorDetails(
+                url,
+                "No se pudo obtener el contenido"
+            );
         } catch (e) {
-            _debug += "DETAIL exception: " + String(e) + "\n";
+            log("DETAIL exception: " + String(e));
             return errorDetails(url, String(e));
         }
     };
