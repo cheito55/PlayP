@@ -1,0 +1,22 @@
+{
+  "name": "PlayPelis ESPlay GraphQL",
+  "description": "PlayPelis para GrayJay usando el backend GraphQL ESPlay y fuentes de vídeo expuestas por el backend.",
+  "author": "cheito55",
+  "authorUrl": "",
+  "sourceUrl": "https://github.com/cheito55/PlayPelis",
+  "repositoryUrl": "https://github.com/cheito55/PlayPelis",
+  "scriptUrl": "./PlayPelis_EsPlay_GraphQL_GrayJay_v2.js",
+  "version": 2,
+  "iconUrl": "",
+  "id": "b7c1e4d2-6a91-4f38-9c25-73e8b1a4d650",
+  "scriptSignature": "",
+  "scriptPublicKey": "",
+  "packages": [
+    "Http",
+    "Utilities"
+  ],
+  "allowEval": false,
+  "allowUrls": [
+    "api.esplay.one"
+  ]
+}
