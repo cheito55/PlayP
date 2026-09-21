@@ -21,7 +21,7 @@
  * ES5 only: var, classic functions/loops.
  */
 
-var PID = "2d6e3b71-9f20-4a58-bc31-6e7d5f8a1042";
+var PID = "c1d7a4e2-8f36-4b90-a125-63e9d7f10482";
 var PLATFORM = "PlayPelisScrape";
 var PPID = new PlatformID(PLATFORM, PLATFORM, PID);
 
@@ -35,8 +35,15 @@ var MAX_SOURCES = 16;
 var _settings = {};
 var _debug = "";
 
+/* Ponlo en false cuando todo funcione. */
+var DEBUG_THROW = true;
+
 function log(s) {
     _debug += String(s) + "\n";
+}
+
+function resetDebug() {
+    _debug = "";
 }
 
 function clean(s) {
@@ -66,7 +73,11 @@ function htmlGet(url) {
             "User-Agent": UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": BASE + "/"
-        });
+        }, false);
+
+        if (r && r.code !== undefined && r.code !== 200) {
+            log("HTTP " + r.code + " en " + url);
+        }
 
         if (!r) {
             log("GET sin respuesta: " + url);
@@ -220,6 +231,20 @@ function catalogVideo(id, title, poster, url) {
     });
 }
 
+var SCRIPT_VERSION = "v5-diag";
+
+function debugItem(title) {
+    var text = "Script " + SCRIPT_VERSION + "\nBASE: " + BASE + "\n" + _debug;
+    if (text.length > 1500) text = text.substring(0, 1500);
+
+    return catalogVideo(
+        "debug_" + Math.floor(Math.random() * 1000000),
+        title,
+        "",
+        "ppscrape://debug/" + encodeURIComponent(text)
+    );
+}
+
 function detailId(url) {
     return encodeURIComponent(url);
 }
@@ -233,7 +258,7 @@ function parseInternal(url) {
 
     if (s.indexOf("ppscrape://") !== 0) return null;
 
-    var m = s.match(/^ppscrape:\/\/(movie|tvshow|episode)\/(.+)$/);
+    var m = s.match(/^ppscrape:\/\/(movie|tvshow|episode|debug)\/(.+)$/);
     if (!m) return null;
 
     return {
@@ -243,7 +268,9 @@ function parseInternal(url) {
 }
 
 function extractCards(html) {
+    log("HTML recibido: " + (html ? html.length : 0) + " bytes");
     var blocks = elementsByClass(html, "mouCgDQMxDwt");
+    log("Bloques con clase de tarjeta: " + blocks.length);
     var out = [];
     var seen = {};
 
@@ -691,7 +718,7 @@ function extractDood(url) {
         r = http.GET(pass, {
             "User-Agent": UA,
             "Referer": "https://dood.wf/"
-        });
+        }, false);
     } catch (e) {
         log("Dood GET: " + String(e));
         return null;
@@ -954,6 +981,11 @@ function getDetails(url) {
     var p = parseInternal(url);
     if (!p) return null;
 
+    if (p.kind == "debug") {
+        _debug = p.url;
+        return errorDetails(url, "Diagnóstico");
+    }
+
     if (p.kind == "movie") return movieDetails(p.url);
     if (p.kind == "tvshow") return seriesDetails(p.url);
     if (p.kind == "episode") return episodeDetails(p.url);
@@ -989,23 +1021,26 @@ if (typeof source != "undefined") {
 
     source.getSearchCapabilities = function() {
         return {
-            types: [2],
+            types: [Type.Feed.Mixed],
             sorts: [],
             filters: []
         };
     };
 
     source.search = function(query) {
+        var items = [];
+
         try {
-            return new VideoPager(
-                search(query || ""),
-                false,
-                null
-            );
+            items = search(query || "");
         } catch (e) {
             log("SEARCH exception: " + String(e));
-            return new VideoPager([], false, null);
         }
+
+        if (!items.length && DEBUG_THROW) {
+            items = [debugItem("[DIAG] Búsqueda sin resultados - toca para ver el motivo")];
+        }
+
+        return new VideoPager(items, false, null);
     };
 
     source.searchSuggestions = function(query) {
@@ -1013,16 +1048,22 @@ if (typeof source != "undefined") {
     };
 
     source.getHome = function() {
+        var items = [];
+
         try {
-            return new VideoPager(
-                home(),
-                false,
-                null
-            );
+            items = home();
         } catch (e) {
             log("HOME exception: " + String(e));
-            return new VideoPager([], false, null);
         }
+
+        if (DEBUG_THROW) {
+            var t = items.length
+                ? "[DIAG " + SCRIPT_VERSION + "] Home OK con " + items.length + " items - toca para ver log"
+                : "[DIAG " + SCRIPT_VERSION + "] Home VACÍO - toca para ver el motivo";
+            items.unshift(debugItem(t));
+        }
+
+        return new VideoPager(items, false, null);
     };
 
     source.isChannelUrl = function(url) {
