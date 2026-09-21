@@ -59,7 +59,7 @@ var _debug = "";
 var _lastProvider = "";
 
 function log(s) { _debug += String(s) + "\n"; }
-function resetDebug() { _debug = ""; }
+function resetDebug() { _debug = ""; _dead = {}; }
 function clean(s) {
     if (s == null) return "";
     return String(s).replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&#x27;/g,"'").replace(/\\u0026/g,"&").replace(/\\\//g,"/").replace(/\s+/g," ").trim();
@@ -81,13 +81,26 @@ function providerFor(url) {
     return null;
 }
 function baseFor(url) { var p=providerFor(url); return p ? p.base : (url.match(/^https?:\/\/[^\/]+/i)||[""])[0]; }
+var _dead = {};
+var DEBUG_ON = true;
+var SCRIPT_VERSION = "v7-diag";
+
 function httpGet(url, base) {
+    var host = hostOf(url);
+    if (_dead[host]) return "";
     try {
-        var r = http.GET(url, {"User-Agent":UA,"Accept":"text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8","Referer":(base || url)});
+        var r = http.GET(url, {"User-Agent":UA,"Accept":"text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8","Referer":(base || url)}, false);
+        if (r && r.code !== undefined && r.code !== 200) log("HTTP " + r.code + " " + host);
         var b = readBody(r);
         if (b && b.length > MAX_HTML) b = b.substring(0, MAX_HTML);
         return b;
-    } catch(e) { log("GET " + url + " -> " + String(e)); return ""; }
+    } catch(e) {
+        _dead[host] = 1;
+        var msg = String(e).replace(/^Error:\s*/, "");
+        if (/resolve host|UnknownHost/i.test(msg)) msg = "DNS no resuelve";
+        log("X " + host + " : " + msg.substring(0, 50));
+        return "";
+    }
 }
 function blocksByClass(html, className) {
     var out=[], re=/<([a-zA-Z][a-zA-Z0-9:-]*)\b[^>]*class=["']([^"']*)["'][^>]*>/gi, m;
@@ -118,7 +131,7 @@ function isBadTitle(t){var x=normalizeTitle(t);return !x || x.indexOf("erotic")>
 function cardFromBlock(b, base){var u=firstHref(b,base), t=firstTag(b,"h1")||firstTag(b,"h2")||firstTag(b,"h3")||firstTag(b,"h4")||textIn(b,"entry-title")||textIn(b,"item-title")||textIn(b,"lnk-blk"); if(!t){var a=/<a\b[^>]*>([\s\S]*?)<\/a>/i.exec(b);if(a)t=strip(a[1]);} var img=firstImg(b,base); if(!u||isBadTitle(t))return null; return {title:clean(t),url:u,poster:img,type:typeFor(u)};}
 function extractCards(html, base, classes){var out=[],seen={},i,j,blocks=[];for(i=0;i<(classes||[]).length;i++){blocks=blocks.concat(blocksByClass(html,classes[i]));}if(!blocks.length){blocks=tagBlocks(html,"article");blocks=blocks.concat(tagBlocks(html,"li"));}for(i=0;i<blocks.length&&out.length<MAX_ITEMS;i++){var x=cardFromBlock(blocks[i],base);if(x&&!seen[x.url]){seen[x.url]=1;out.push(x);}}return out;}
 function getPathVariants(p, q, home){var a=home?p.home:p.search,i,out=[];for(i=0;i<a.length;i++)out.push(a[i].replace(/\{q\}/g,encodeURIComponent(q).replace(/%20/g,"+")));return out;}
-function fetchFirst(p, paths){var i,h,u;for(i=0;i<paths.length;i++){u=p.base+paths[i];h=httpGet(u,p.base);if(h&&h.length>800){_lastProvider=p.name;log(p.name+" OK "+paths[i]+" len="+h.length);return {html:h,url:u,base:p.base};}log(p.name+" no usable HTML "+paths[i]);}return null;}
+function fetchFirst(p, paths){var i,h,u;for(i=0;i<paths.length;i++){u=p.base+paths[i];h=httpGet(u,p.base);if(h&&h.length>800){_lastProvider=p.name;log("OK "+p.name+" "+paths[i]+" len="+h.length);return {html:h,url:u,base:p.base};}if(_dead[hostOf(p.base)])return null;}log("SIN HTML "+p.name);return null;}
 function parseProviderSearch(p,q){var r=fetchFirst(p,getPathVariants(p,q,false));if(!r)return[];var out=[],i,sites,cards,b,x;
     if(p.name=="Pelisplushd"){sites=tagBlocks(r.html,"web-site");for(i=0;i<sites.length;i++){cards=blocksByClass(sites[i],"mouCgDQMxDwt");for(var j=0;j<cards.length&&out.length<MAX_ITEMS;j++){b=cardFromBlock(cards[j],r.base);if(b)out.push(b);}}}
     if(!out.length) out=extractCards(r.html,r.base,p.card);
@@ -127,13 +140,24 @@ function parseProviderSearch(p,q){var r=fetchFirst(p,getPathVariants(p,q,false))
 }
 function parseProviderHome(p){var r=fetchFirst(p,getPathVariants(p,"",true));if(!r)return[];var out=extractCards(r.html,r.base,p.card),i;for(i=0;i<out.length;i++)out[i].provider=p.name;log(p.name+" home="+out.length);return out;}
 function mergeUnique(items){var out=[],seen={},i,key;for(i=0;i<items.length&&out.length<MAX_ITEMS;i++){key=normalizeTitle(items[i].title)+"|"+normalizeTitle(items[i].type);if(!seen[key]){seen[key]=1;out.push(items[i]);}}return out;}
-function searchProviders(q){var all=[],i,r;for(i=0;i<PROVIDERS.length&&all.length<MAX_ITEMS*2;i++){r=parseProviderSearch(PROVIDERS[i],q);all=all.concat(r);}return mergeUnique(all);}
-function homeProviders(){var all=[],i,r;for(i=0;i<PROVIDERS.length&&all.length<MAX_ITEMS*2;i++){r=parseProviderHome(PROVIDERS[i]);all=all.concat(r);}return mergeUnique(all);}
+function searchProviders(q){var all=[],i,r;for(i=0;i<PROVIDERS.length&&all.length<30;i++){r=parseProviderSearch(PROVIDERS[i],q);all=all.concat(r);}return mergeUnique(all);}
+function homeProviders(){var all=[],i,r;for(i=0;i<PROVIDERS.length&&all.length<30;i++){r=parseProviderHome(PROVIDERS[i]);all=all.concat(r);}return mergeUnique(all);}
 
-function tmdbGet(path){var u=TMDB_API+path+(path.indexOf("?")>=0?"&":"?")+"api_key="+enc(TMDB_KEY)+"&language=es-AR";try{var r=http.GET(u,{"User-Agent":UA,"Accept":"application/json"}),b=readBody(r);return b?JSON.parse(b):null;}catch(e){log("TMDB "+String(e));return null;}}
+function tmdbGet(path){var u=TMDB_API+path+(path.indexOf("?")>=0?"&":"?")+"api_key="+enc(TMDB_KEY)+"&language=es-AR";try{var r=http.GET(u,{"User-Agent":UA,"Accept":"application/json"},false),b=readBody(r);return b?JSON.parse(b):null;}catch(e){log("TMDB "+String(e));return null;}}
 function tmdbPoster(p){return p?TMDB_IMG+p:"";}
 function tmdbList(path){var d=tmdbGet(path),out=[],i,x;if(!d||!d.results)return out;for(i=0;i<d.results.length&&out.length<MAX_ITEMS;i++){x=d.results[i];if(x&&(x.media_type=="movie"||x.media_type=="tv"||x.title||x.name))out.push({title:x.title||x.name,url:"ppv6://tmdb/"+(x.media_type=="tv"?"tvshow":"movie")+"/"+x.id,poster:tmdbPoster(x.poster_path),type:x.media_type=="tv"?"tvshow":"movie",tmdbId:x.id});}return out;}
 
+function debugItems(header){
+    var out=[], lines=(SCRIPT_VERSION+" | home providers\n"+_debug).split("\n"), n=0, i, l;
+    out.push(catalogVideo("diag_h_"+Math.floor(Math.random()*1000000),"[DIAG] "+header,"","ppv6://debug/x"));
+    for(i=0;i<lines.length&&n<40;i++){
+        l=String(lines[i]).replace(/^\s+|\s+$/g,"");
+        if(!l) continue;
+        out.push(catalogVideo("diag_"+i+"_"+Math.floor(Math.random()*1000000),"[DIAG] "+l.substring(0,90),"","ppv6://debug/"+i));
+        n++;
+    }
+    return out;
+}
 function makeWeb(kind,url){return "ppv6://web/"+kind+"/"+enc(url);}
 function parseInternal(url){var s=String(url||""),m=s.match(/^ppv6:\/\/web\/(movie|tvshow|episode)\/(.+)$/);if(m)return{mode:"web",kind:m[1],url:dec(m[2])};m=s.match(/^ppv6:\/\/tmdb\/(movie|tvshow)\/(\d+)$/);if(m)return{mode:"tmdb",kind:m[1],id:m[2]};return null;}
 function author(){return new PlatformAuthorLink(PPID,"PlayPelis", "https://github.com/cheito55/PlayP", "", 0);}
@@ -161,18 +185,18 @@ function tmdbDetails(kind,id){var d=tmdbGet("/"+(kind=="tvshow"?"tv":"movie")+"/
 function findProviderMatch(title,kind){var all=searchProviders(title),q=normalizeTitle(title),best=null,score=-1,i,s,t;for(i=0;i<all.length;i++){t=normalizeTitle(all[i].title);if(!t)continue;s=(t==q?100:((t.indexOf(q)>=0||q.indexOf(t)>=0)?60:0));if(kind==all[i].type)s+=15;if(s>score){score=s;best=all[i];}}if(best)log("MATCH "+title+" -> "+best.provider+" / "+best.title+" score="+score);return best;}
 function search(query){resetDebug();var out=searchProviders(query);if(out.length){var r=[],i;for(i=0;i<out.length;i++)r.push(catalogVideo("web_"+i+"_"+enc(out[i].url),out[i].title,out[i].poster,makeWeb(out[i].type,out[i].url)));return r;}var t=tmdbList("/search/multi?query="+enc(query)+"&page=1&include_adult=false");for(var j=0;j<t.length;j++)t[j]=catalogVideo("tmdb_"+j,t[j].title,t[j].poster,t[j].url);return t;}
 function home(){resetDebug();var out=homeProviders();if(out.length){var r=[],i;for(i=0;i<out.length;i++)r.push(catalogVideo("home_"+i+"_"+enc(out[i].url),out[i].title,out[i].poster,makeWeb(out[i].type,out[i].url)));return r;}var t=tmdbList("/trending/all/day");for(var j=0;j<t.length;j++)t[j]=catalogVideo("tmdbhome_"+j,t[j].title,t[j].poster,t[j].url);return t;}
-function details(url){var p=parseInternal(url);if(!p)return null;if(p.mode=="tmdb"){var td=tmdbDetails(p.kind,p.id);if(!td)return null;var m=findProviderMatch(td.title,p.kind);if(m){var gd=genericDetail(m.url);if(gd&&gd.sources.length)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:gd.title||td.title,thumbnails:thumb(gd.poster||td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:makeWeb(p.kind,m.url),video:new VideoSourceDescriptor(gd.sources),description:td.synopsis+"\n\nProveedor: "+gd.provider+"\nFuentes: "+gd.sources.length+"\n\n=== DEBUG ===\n"+_debug});}return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:td.title,thumbnails:thumb(td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:url,video:new VideoSourceDescriptor([]),description:td.synopsis+"\n\nNo se encontró una fuente reproducible.\n\n=== DEBUG ===\n"+_debug});}
+function details(url){if(String(url||"").indexOf("ppv6://debug/")===0){return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"diag",PID),name:"Diagnóstico",thumbnails:new Thumbnails([]),author:author(),uploadDate:0,viewCount:0,isLive:false,url:String(url),video:new VideoSourceDescriptor([]),description:_debug});}var p=parseInternal(url);if(!p)return null;if(p.mode=="tmdb"){var td=tmdbDetails(p.kind,p.id);if(!td)return null;var m=findProviderMatch(td.title,p.kind);if(m){var gd=genericDetail(m.url);if(gd&&gd.sources.length)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:gd.title||td.title,thumbnails:thumb(gd.poster||td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:makeWeb(p.kind,m.url),video:new VideoSourceDescriptor(gd.sources),description:td.synopsis+"\n\nProveedor: "+gd.provider+"\nFuentes: "+gd.sources.length+"\n\n=== DEBUG ===\n"+_debug});}return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:td.title,thumbnails:thumb(td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:url,video:new VideoSourceDescriptor([]),description:td.synopsis+"\n\nNo se encontró una fuente reproducible.\n\n=== DEBUG ===\n"+_debug});}
     var d=genericDetail(p.url);if(!d)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"err_"+enc(p.url),PID),name:"PlayPelis: sin respuesta",thumbnails:new Thumbnails([]),author:author(),uploadDate:0,viewCount:0,isLive:false,url:p.url,video:new VideoSourceDescriptor([]),description:"El proveedor no devolvió HTML.\n\n=== DEBUG ===\n"+_debug});return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"web_"+enc(p.url),PID),name:d.title||"Sin título",thumbnails:thumb(d.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:p.url,video:new VideoSourceDescriptor(d.sources),description:(d.synopsis||"")+"\n\nCatálogo/proveedor: "+d.provider+"\nFuentes descubiertas: "+d.sources.length+"\n\n=== DEBUG ===\n"+_debug});
 }
 if(typeof source!="undefined"){
  source.setSettings=function(s){_settings=s||{};};
  source.enable=function(c,s){_settings=s||{};};
- source.getSearchCapabilities=function(){return{types:[2],sorts:[],filters:[]};};
- source.search=function(q){try{return new VideoPager(search(q||""),false,null);}catch(e){return new VideoPager([],false,null);}};
+ source.getSearchCapabilities=function(){return{types:[Type.Feed.Mixed],sorts:[],filters:[]};};
+ source.search=function(q){var it=[];try{it=search(q||"");}catch(e){log("SEARCH exc "+String(e).substring(0,60));}if(DEBUG_ON&&!it.length)it=debugItems("Búsqueda sin resultados");return new VideoPager(it,false,null);};
  source.searchSuggestions=function(q){return[];};
- source.getHome=function(){try{return new VideoPager(home(),false,null);}catch(e){return new VideoPager([],false,null);}};
+ source.getHome=function(){var it=[];try{it=home();}catch(e){log("HOME exc "+String(e).substring(0,60));}if(DEBUG_ON){it=debugItems((it.length?"Home con "+it.length+" items":"Home VACÍO")+" ("+_lastProvider+")").concat(it);}return new VideoPager(it,false,null);};
  source.isChannelUrl=function(){return false;};
- source.isContentDetailsUrl=function(u){return /^ppv6:\/\/(web|tmdb)\//.test(String(u||""));};
+ source.isContentDetailsUrl=function(u){return /^ppv6:\/\/(web|tmdb|debug)\//.test(String(u||""));};
  source.isVideoDetailsUrl=function(u){return source.isContentDetailsUrl(u);};
  source.getVideoDetails=function(u){return source.getContentDetails(u);};
  source.getContentDetails=function(u){try{return details(u);}catch(e){log("DETAIL "+String(e));return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"err",PID),name:"PlayPelis error",thumbnails:new Thumbnails([]),author:author(),uploadDate:0,viewCount:0,isLive:false,url:String(u||""),video:new VideoSourceDescriptor([]),description:String(e)+"\n\n"+_debug});}};
