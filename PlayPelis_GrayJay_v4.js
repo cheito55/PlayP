@@ -1,13 +1,13 @@
 /*
- * PlayPelis GrayJay Source v6 - Multi proveedor
+ * PlayPelis GrayJay Source v7 - TMDB catalog + provider playback
  *
  * Catálogos descubiertos en el APK PlayPelis:
  * Pelisplushd, Cuevana3, PeliSmart, Movie123, Bflix, New Movies 123,
  * Cuevana2, Gnula, EntrePeliculasYSeries y PelisPlus2 (solo web; sin ESPlay GraphQL).
  *
  * Diseño:
- *  - intenta varios catálogos en paralelo lógico (uno tras otro) y deduplica;
- *  - TMDB queda como fallback de catálogo/posters;
+ *  - NO consulta los proveedores durante Home/Search; esto evita esperas de 1 minuto cuando un dominio devuelve 0 bytes;
+ *  - TMDB es el catálogo principal para que Home/Search no dependan de webs externas;
  *  - el proveedor de reproducción se descubre desde la página encontrada;
  *  - reconoce HLS/MP4 directos, iframes y URLs de servidores del APK;
  *  - Pelisplushd mantiene sus endpoints AJAX conocidos como fallback;
@@ -18,7 +18,7 @@
  * de embeds, y deja trazas de lo que encontró.
  */
 
-var PID = "7f1b0d66-6f9e-4c3d-9d2c-6a4f8e2b1c70";
+var PID = "c4a91d2e-7b53-4e8a-9f10-6d32b7c45190";
 var PLATFORM = "PlayPelis";
 var PPID = new PlatformID(PLATFORM, PLATFORM, PID);
 
@@ -132,10 +132,10 @@ function homeProviders(){var all=[],i,r;for(i=0;i<PROVIDERS.length&&all.length<M
 
 function tmdbGet(path){var u=TMDB_API+path+(path.indexOf("?")>=0?"&":"?")+"api_key="+enc(TMDB_KEY)+"&language=es-AR";try{var r=http.GET(u,{"User-Agent":UA,"Accept":"application/json"}),b=readBody(r);return b?JSON.parse(b):null;}catch(e){log("TMDB "+String(e));return null;}}
 function tmdbPoster(p){return p?TMDB_IMG+p:"";}
-function tmdbList(path){var d=tmdbGet(path),out=[],i,x;if(!d||!d.results)return out;for(i=0;i<d.results.length&&out.length<MAX_ITEMS;i++){x=d.results[i];if(x&&(x.media_type=="movie"||x.media_type=="tv"||x.title||x.name))out.push({title:x.title||x.name,url:"ppv6://tmdb/"+(x.media_type=="tv"?"tvshow":"movie")+"/"+x.id,poster:tmdbPoster(x.poster_path),type:x.media_type=="tv"?"tvshow":"movie",tmdbId:x.id});}return out;}
+function tmdbList(path){var d=tmdbGet(path),out=[],i,x;if(!d||!d.results)return out;for(i=0;i<d.results.length&&out.length<MAX_ITEMS;i++){x=d.results[i];if(x&&(x.media_type=="movie"||x.media_type=="tv"))out.push({title:x.title||x.name,url:"ppv7://tmdb/"+(x.media_type=="tv"?"tvshow":"movie")+"/"+x.id,poster:tmdbPoster(x.poster_path),type:x.media_type=="tv"?"tvshow":"movie",tmdbId:x.id});}return out;}
 
-function makeWeb(kind,url){return "ppv6://web/"+kind+"/"+enc(url);}
-function parseInternal(url){var s=String(url||""),m=s.match(/^ppv6:\/\/web\/(movie|tvshow|episode)\/(.+)$/);if(m)return{mode:"web",kind:m[1],url:dec(m[2])};m=s.match(/^ppv6:\/\/tmdb\/(movie|tvshow)\/(\d+)$/);if(m)return{mode:"tmdb",kind:m[1],id:m[2]};return null;}
+function makeWeb(kind,url){return "ppv7://web/"+kind+"/"+enc(url);}
+function parseInternal(url){var s=String(url||""),m=s.match(/^ppv7:\/\/web\/(movie|tvshow|episode)\/(.+)$/);if(m)return{mode:"web",kind:m[1],url:dec(m[2])};m=s.match(/^ppv7:\/\/tmdb\/(movie|tvshow)\/(\d+)$/);if(m)return{mode:"tmdb",kind:m[1],id:m[2]};return null;}
 function author(){return new PlatformAuthorLink(PPID,"PlayPelis", "https://github.com/cheito55/PlayP", "", 0);}
 function thumb(u){return u?new Thumbnails([new Thumbnail(u,100)]):new Thumbnails([]);}
 function catalogVideo(id,title,poster,url){return new PlatformVideo({id:new PlatformID(PLATFORM,id,PID),name:title||"Sin título",thumbnails:thumb(poster),author:author(),uploadDate:0,viewCount:0,duration:0,isLive:false,url:url});}
@@ -158,9 +158,46 @@ function providerPageSources(url,kind){var candidates=[],p=providerFor(url),i,h,
 }
 function genericDetail(url){var p=providerFor(url),b=baseFor(url),h=httpGet(url,b);if(!h)return null;var title=firstTag(h,"h1")||textIn(h,"entry-title")||textIn(h,"heading-name")||textIn(h,"title"),poster=firstImg(h,b),syn=textIn(h,"description")||textIn(h,"sinopsis")||textIn(h,"overview");if(!title){var og=/property=["']og:title["'][^>]*content=["']([^"']+)/i.exec(h);if(og)title=clean(og[1]);}if(!poster){var om=/property=["']og:image["'][^>]*content=["']([^"']+)/i.exec(h);if(om)poster=absUrl(om[1],b);}return{title:clean(title),poster:poster,synopsis:clean(syn),provider:p?p.name:hostOf(url),sources:providerPageSources(url,typeFor(url))};}
 function tmdbDetails(kind,id){var d=tmdbGet("/"+(kind=="tvshow"?"tv":"movie")+"/"+id);if(!d)return null;return{title:d.title||d.name,poster:tmdbPoster(d.poster_path),synopsis:d.overview||"",year:String(d.release_date||d.first_air_date||"").substring(0,4),kind:kind};}
-function findProviderMatch(title,kind){var all=searchProviders(title),q=normalizeTitle(title),best=null,score=-1,i,s,t;for(i=0;i<all.length;i++){t=normalizeTitle(all[i].title);if(!t)continue;s=(t==q?100:((t.indexOf(q)>=0||q.indexOf(t)>=0)?60:0));if(kind==all[i].type)s+=15;if(s>score){score=s;best=all[i];}}if(best)log("MATCH "+title+" -> "+best.provider+" / "+best.title+" score="+score);return best;}
-function search(query){resetDebug();var out=searchProviders(query);if(out.length){var r=[],i;for(i=0;i<out.length;i++)r.push(catalogVideo("web_"+i+"_"+enc(out[i].url),out[i].title,out[i].poster,makeWeb(out[i].type,out[i].url)));return r;}var t=tmdbList("/search/multi?query="+enc(query)+"&page=1&include_adult=false");for(var j=0;j<t.length;j++)t[j]=catalogVideo("tmdb_"+j,t[j].title,t[j].poster,t[j].url);return t;}
-function home(){resetDebug();var out=homeProviders();if(out.length){var r=[],i;for(i=0;i<out.length;i++)r.push(catalogVideo("home_"+i+"_"+enc(out[i].url),out[i].title,out[i].poster,makeWeb(out[i].type,out[i].url)));return r;}var t=tmdbList("/trending/all/day");for(var j=0;j<t.length;j++)t[j]=catalogVideo("tmdbhome_"+j,t[j].title,t[j].poster,t[j].url);return t;}
+function findProviderMatch(title,kind){
+    var q=normalizeTitle(title), best=null, score=-1, i, r, all, t, s;
+    /* Solo intenta proveedores que históricamente fueron los más útiles.
+       Home/Search nunca llegan aquí. */
+    var fastProviders=[];
+    for(i=0;i<PROVIDERS.length;i++){
+        if(PROVIDERS[i].name=="Cuevana3" || PROVIDERS[i].name=="PeliSmart" || PROVIDERS[i].name=="Bflix" || PROVIDERS[i].name=="Cuevana2") fastProviders.push(PROVIDERS[i]);
+    }
+    for(i=0;i<fastProviders.length;i++){
+        r=parseProviderSearch(fastProviders[i],title);
+        all=r;
+        for(var j=0;j<all.length;j++){
+            t=normalizeTitle(all[j].title);
+            if(!t)continue;
+            s=(t==q?100:((t.indexOf(q)>=0||q.indexOf(t)>=0)?60:0));
+            if(kind==all[j].type)s+=15;
+            if(s>score){score=s;best=all[j];}
+        }
+        if(score>=115)break;
+    }
+    if(best)log("MATCH "+title+" -> "+best.provider+" / "+best.title+" score="+score);
+    else log("NO PROVIDER MATCH for "+title);
+    return best;
+}
+function search(query){
+    resetDebug();
+    var t=tmdbList("/search/multi?query="+enc(query)+"&page=1&include_adult=false");
+    var r=[],i;
+    for(i=0;i<t.length;i++)r.push(catalogVideo("tmdb_"+i,t[i].title,t[i].poster,t[i].url));
+    if(!r.length) log("TMDB SEARCH returned 0 results");
+    return r;
+}
+function home(){
+    resetDebug();
+    var t=tmdbList("/trending/all/day");
+    var r=[],i;
+    for(i=0;i<t.length;i++)r.push(catalogVideo("tmdbhome_"+i,t[i].title,t[i].poster,t[i].url));
+    if(!r.length) log("TMDB HOME returned 0 results");
+    return r;
+}
 function details(url){var p=parseInternal(url);if(!p)return null;if(p.mode=="tmdb"){var td=tmdbDetails(p.kind,p.id);if(!td)return null;var m=findProviderMatch(td.title,p.kind);if(m){var gd=genericDetail(m.url);if(gd&&gd.sources.length)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:gd.title||td.title,thumbnails:thumb(gd.poster||td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:makeWeb(p.kind,m.url),video:new VideoSourceDescriptor(gd.sources),description:td.synopsis+"\n\nProveedor: "+gd.provider+"\nFuentes: "+gd.sources.length+"\n\n=== DEBUG ===\n"+_debug});}return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"tmdb_"+p.id,PID),name:td.title,thumbnails:thumb(td.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:url,video:new VideoSourceDescriptor([]),description:td.synopsis+"\n\nNo se encontró una fuente reproducible.\n\n=== DEBUG ===\n"+_debug});}
     var d=genericDetail(p.url);if(!d)return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"err_"+enc(p.url),PID),name:"PlayPelis: sin respuesta",thumbnails:new Thumbnails([]),author:author(),uploadDate:0,viewCount:0,isLive:false,url:p.url,video:new VideoSourceDescriptor([]),description:"El proveedor no devolvió HTML.\n\n=== DEBUG ===\n"+_debug});return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"web_"+enc(p.url),PID),name:d.title||"Sin título",thumbnails:thumb(d.poster),author:author(),uploadDate:0,viewCount:0,isLive:false,url:p.url,video:new VideoSourceDescriptor(d.sources),description:(d.synopsis||"")+"\n\nCatálogo/proveedor: "+d.provider+"\nFuentes descubiertas: "+d.sources.length+"\n\n=== DEBUG ===\n"+_debug});
 }
@@ -172,7 +209,7 @@ if(typeof source!="undefined"){
  source.searchSuggestions=function(q){return[];};
  source.getHome=function(){try{return new VideoPager(home(),false,null);}catch(e){return new VideoPager([],false,null);}};
  source.isChannelUrl=function(){return false;};
- source.isContentDetailsUrl=function(u){return /^ppv6:\/\/(web|tmdb)\//.test(String(u||""));};
+ source.isContentDetailsUrl=function(u){return /^ppv7:\/\/(web|tmdb)\//.test(String(u||""));};
  source.isVideoDetailsUrl=function(u){return source.isContentDetailsUrl(u);};
  source.getVideoDetails=function(u){return source.getContentDetails(u);};
  source.getContentDetails=function(u){try{return details(u);}catch(e){log("DETAIL "+String(e));return new PlatformVideoDetails({id:new PlatformID(PLATFORM,"err",PID),name:"PlayPelis error",thumbnails:new Thumbnails([]),author:author(),uploadDate:0,viewCount:0,isLive:false,url:String(u||""),video:new VideoSourceDescriptor([]),description:String(e)+"\n\n"+_debug});}};
