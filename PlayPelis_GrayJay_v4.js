@@ -826,10 +826,22 @@ function provJuanita(ctx) {
         urls.push(ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + slugs[i]
             : base + "/series/serieInfo.php?nombreSerie=" + slugs[i] + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode);
     }
+    /* pagina "ver-serie" (la que da el usuario): puede traer el reproductor con otro
+       marcado, distinto del fragmento AJAX de serieInfo.php */
+    var verSerieIdx = -1;
+    if (ctx.kind == "tv" && slugs.length) { verSerieIdx = urls.length; urls.push(base + "/series/ver-serie/" + slugs[0]); }
     var bodies = batchGet(urls, base + "/");
     for (i = 0; i < bodies.length; i++) {
+        if (i == verSerieIdx) continue;
         var items = parseJuanita(bodies[i], base);
-        if (items.length) { log("  slug OK: " + slugs[i]); return items; }
+        if (items.length) { log("  slug OK: " + urls[i]); return items; }
+    }
+    if (verSerieIdx >= 0 && bodies[verSerieIdx]) {
+        var vs = bodies[verSerieIdx], out = [], links = discoverLinks(vs, urls[verSerieIdx]), j;
+        for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
+        var direct = scanMedia(vs, "", base + "/", base + "/"), k;
+        for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
+        if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
     }
     log("  slugs probados: " + slugs.join(", "));
     return [];
@@ -853,39 +865,70 @@ function parseCuevana(html, base) {
     }
     return out;
 }
+/* Distintas "familias" de Cuevana: mismo negocio, plantillas de URL diferentes.
+   La familia .eu/.ai/.me/.cc son espejos entre si (mismo motor); cuevana3e.pro
+   (alias cuevana3l.biz) es un sitio hermano con otro front-end (sin /ver-pelicula/,
+   usa /pelicula/ y /serie/<slug>/episodio-SxE) y sin endpoint de busqueda conocido. */
+var CUEVANA_FAMILIES = [
+    {
+        bases: ["https://www.cuevana3.eu", "https://cuevana3.ai", "https://cuevana3.me", "https://cuevana3.cc"],
+        movie: function (base, slug) { return base + "/ver-pelicula/" + slug; },
+        episode: function (base, slug, s, e) { return base + "/episodio/" + slug + "-temporada-" + s + "-episodio-" + e; },
+        search: function (base, q) { return base + "/search?q=" + enc(q); }
+    },
+    {
+        bases: ["https://cuevana3e.pro"],
+        movie: function (base, slug) { return base + "/pelicula/" + slug; },
+        episode: function (base, slug, s, e) { return base + "/serie/" + slug + "/episodio-" + s + "x" + e; },
+        search: null
+    }
+];
 function provCuevana(ctx) {
-    var bases = ["https://www.cuevana3.eu", "https://cuevana3.ai", "https://cuevana3.me", "https://cuevana3.cc"], bi, i;
-    for (bi = 0; bi < bases.length && budgetLeft(); bi++) {
-        var base = bases[bi], slugs = uniq([slugCuevana(ctx.titleEs), slugCuevana(ctx.titleEn)]), urls = [], reached = false;
-        for (i = 0; i < slugs.length; i++) {
-            urls.push(ctx.kind == "movie" ? base + "/ver-pelicula/" + slugs[i] : base + "/episodio/" + slugs[i] + "-temporada-" + ctx.season + "-episodio-" + ctx.episode);
-        }
-        var bodies = batchGet(urls, base + "/"), html = "", pageUrl = "";
-        for (i = 0; i < bodies.length; i++) {
-            if (bodies[i]) reached = true;
-            if (bodies[i] && /data-tr=|data-link=|data-server=/i.test(bodies[i])) { html = bodies[i]; pageUrl = urls[i]; break; }
-        }
-        if (!html && budgetLeft()) {
-            var sh = httpGet(base + "/search?q=" + enc(ctx.titleEs), base + "/");
-            if (sh) {
-                reached = true;
-                var best = pickBest(findLinks(sh, base, ctx.kind), ctx);
-                if (best) {
-                    pageUrl = best.url;
-                    if (ctx.kind == "tv") {
-                        var slug = String(best.url).split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop();
-                        pageUrl = base + "/episodio/" + slug + "-temporada-" + ctx.season + "-episodio-" + ctx.episode;
+    var fi, bi, i;
+    for (fi = 0; fi < CUEVANA_FAMILIES.length && budgetLeft(); fi++) {
+        var fam = CUEVANA_FAMILIES[fi];
+        for (bi = 0; bi < fam.bases.length && budgetLeft(); bi++) {
+            var base = fam.bases[bi], slugs = uniq([slugCuevana(ctx.titleEs), slugCuevana(ctx.titleEn)]), urls = [], reached = false;
+            for (i = 0; i < slugs.length; i++) urls.push(ctx.kind == "movie" ? fam.movie(base, slugs[i]) : fam.episode(base, slugs[i], ctx.season, ctx.episode));
+            var bodies = batchGet(urls, base + "/"), html = "", pageUrl = "";
+            for (i = 0; i < bodies.length; i++) {
+                if (bodies[i]) reached = true;
+                if (bodies[i] && /data-tr=|data-link=|data-server=/i.test(bodies[i])) { html = bodies[i]; pageUrl = urls[i]; break; }
+            }
+            if (!html && fam.search && budgetLeft()) {
+                var sh = httpGet(fam.search(base, ctx.titleEs), base + "/");
+                if (sh) {
+                    reached = true;
+                    var best = pickBest(findLinks(sh, base, ctx.kind), ctx);
+                    if (best) {
+                        pageUrl = best.url;
+                        if (ctx.kind == "tv") {
+                            var slug = String(best.url).split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop();
+                            pageUrl = fam.episode(base, slug, ctx.season, ctx.episode);
+                        }
+                        html = httpGet(pageUrl, base + "/");
                     }
-                    html = httpGet(pageUrl, base + "/");
                 }
             }
+            if (!html && reached) {
+                /* variante sin data-tr visible (front-end distinto, ej. cuevana3e.pro):
+                   usar la primera pagina alcanzada y dejar que el escaneo generico
+                   busque iframes/medios sueltos en vez del parser especifico */
+                for (i = 0; i < bodies.length; i++) if (bodies[i]) { html = bodies[i]; pageUrl = urls[i]; break; }
+            }
+            if (html) {
+                var items = parseCuevana(html, base);
+                if (!items.length) {
+                    var links = discoverLinks(html, pageUrl), j;
+                    for (j = 0; j < links.length; j++) items.push(mkCand(links[j], "", pageUrl, "Cuevana3"));
+                    var direct = scanMedia(html, "", pageUrl, pageUrl), k;
+                    for (k = 0; k < direct.length; k++) items.push({ url: "", lang: "", srcs: [direct[k]], prov: "Cuevana3" });
+                }
+                log("  " + pageUrl.substring(0, 100) + " -> " + items.length + " players");
+                if (items.length) return items;
+            }
+            if (reached) break;
         }
-        if (html) {
-            var items = parseCuevana(html, base);
-            log("  " + pageUrl.substring(0, 100) + " -> " + items.length + " players");
-            if (items.length) return items;
-        }
-        if (reached) break;
     }
     return [];
 }
@@ -900,14 +943,60 @@ var SITES = [
     { id: "cinetux", name: "Cinetux", bases: ["https://www.cinetux.nu"], search: ["/?s={q}"], mode: "wp" },
     { id: "pelispedia", name: "Pelispedia", bases: ["https://www.pelispedia.mobi"], search: ["/?s={q}"], mode: "wp" },
     { id: "pelisxd", name: "PelisXD", bases: ["https://www.pelisxd.com"], search: ["/?s={q}"], mode: "wp" },
-    { id: "allpeliculas", name: "AllPeliculas", bases: ["https://allpeliculas.mx"], search: ["/?s={q}"], mode: "wp" },
+    { id: "allpeliculas", name: "AllPeliculas", bases: ["https://allpeliculas.mx", "https://allpeliculas.se"], search: ["/?s={q}"], mode: "wp" },
     { id: "repelis", name: "Repelis", bases: ["https://repelis.red", "https://repelis.io"], search: ["/?s={q}"], mode: "wp" },
-    /* extras (Ajustes > sitios extra) */
+    /* extras (Ajustes > sitios extra). Verificados con web_fetch al agregarlos (sep-2026);
+       los que no pude verificar (bloqueados por bot-detection o robots.txt para mi
+       herramienta, o de los que no tengo certeza del rubro) llevan nota. */
     { id: "pelisplay", name: "PelisPlay", bases: ["https://www.pelisplay.co"], search: ["/search?s={q}", "/?s={q}"], mode: "wp", extra: true },
     { id: "gnula", name: "Gnula", bases: ["https://gnula.uno"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "entrepeliculas", name: "EntrePeliculas", bases: ["https://entrepeliculasyseries.nz"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "smartpelis", name: "SmartPelis", bases: ["https://smartpelis.tv", "https://smartpeli.tv"], search: ["/page/1/?s={q}", "/?s={q}"], mode: "wp", extra: true },
-    { id: "pelisplus2", name: "PelisPlus2", bases: ["https://pelisplus2.ai"], search: ["/search/{q}"], mode: "wp", extra: true }
+    { id: "pelisplus2", name: "PelisPlus2", bases: ["https://pelisplus2.ai", "https://pelisplushd.lat", "https://pelisplus.to"], search: ["/search/{q}"], mode: "wp", extra: true },
+
+    /* --- dominios que pasaste (sep-2026) --- */
+    { id: "cuevana33", name: "Cuevana33", bases: ["https://cuevana33.plus"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisplusnuevo", name: "PelisPlusNuevo", bases: ["https://pelisplusnuevo.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisflix1", name: "Pelisflix1", bases: ["https://pelisflix1.fans", "https://pelisflix1.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "vien2pelis", name: "Vien2Pelis", bases: ["https://vien2pelis.net"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "cineplus123", name: "CinePlus123", bases: ["https://cineplus123.org"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelispop", name: "PelisPop", bases: ["https://pelispop.mov"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "poseidonhd", name: "PoseidonHD", bases: ["https://www.poseidonhd2.co"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "peelink2", name: "Peelink2", bases: ["https://www.peelink2.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "verpeliculasultra", name: "VerPeliculasUltra", bases: ["https://verpeliculasultra.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisenhd", name: "PelisEnHD", bases: ["https://pelisenhd.me"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "cinemitas", name: "Cinemitas", bases: ["https://cinemitas.org"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "cinecalidad", name: "Cinecalidad", bases: ["https://cinecalidad.onl"], search: ["/?s={q}"], mode: "wp", extra: true }, /* verificado: alive, WordPress */
+    { id: "detodopeliculas", name: "DeTodoPeliculas", bases: ["https://detodopeliculas.nu"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "locopelis", name: "LocoPelis", bases: ["https://locopelis.lat"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelismax", name: "PelisMax", bases: ["https://pelismax.one"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "gnulahd", name: "GnulaHD", bases: ["https://gnulahd.org"], search: ["/?s={q}"], mode: "wp", extra: true }, /* bloqueado por robots.txt para mi herramienta, no verificable desde aca */
+    { id: "kindor", name: "Kindor", bases: ["https://kindor.pro"], search: ["/?s={q}"], mode: "wp", extra: true }, /* verificado: alive, /pelicula/ y /serie/ propios; el buscador ?s= no esta confirmado */
+    { id: "cinemascampo", name: "CinemasCampo", bases: ["https://cinemascampo.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelis44", name: "Pelis44", bases: ["https://www.pelis44.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "repelishd", name: "RepelisHD", bases: ["https://repelishd.buzz"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisyseries", name: "PelisYSeries", bases: ["https://www2.pelisyseries.net"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisonline", name: "PelisOnline", bases: ["https://pelisonline.club"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisforte", name: "PelisForte", bases: ["https://www1.pelisforte.se"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelicinehd", name: "PelicineHD", bases: ["https://pelicinehd.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisplayhd", name: "PelisPlayHD", bases: ["https://pelisplayhd.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "peliculaspanda", name: "PeliculasPanda", bases: ["https://peliculaspanda.net"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "pelisen1080p", name: "PelisEn1080p", bases: ["https://pelisen1080p.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "repelis24", name: "Repelis24", bases: ["https://repelis24.onl"], search: ["/?s={q}"], mode: "wp", extra: true }, /* usa slugs numerados (564-titulo-2025.html); no confirme si comparte motor con Repelis */
+    { id: "peliculas8k", name: "Peliculas8K", bases: ["https://peliculas8k.com"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "peliculasstore", name: "Peliculas.store", bases: ["https://www.peliculas.store"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "movies4site", name: "Movies4.site", bases: ["https://movies4.site"], search: ["/?s={q}"], mode: "wp", extra: true }, /* no pude confirmar el rubro/estructura */
+    { id: "fulltv", name: "FullTV", bases: ["https://www.fulltv.com.mx"], search: ["/?s={q}"], mode: "wp", extra: true }, /* baja confianza: puede ser una guia de TV, no un catalogo de embeds */
+
+    /* Cristianas (verificado peliculascristianas.es: alive, WordPress/DooPlay) */
+    { id: "peliculascristianas", name: "PeliculasCristianas", bases: ["https://peliculascristianas.es"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "verpeliculascristianas", name: "VerPeliculasCristianas", bases: ["https://verpeliculascristianas.net"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "seriesbiblicas", name: "SeriesBiblicas", bases: ["https://seriesbiblicas.net"], search: ["/?s={q}"], mode: "wp", extra: true },
+
+    /* Antiguas/clasico (no verificadas, catalogos chicos de cine clasico) */
+    { id: "tucineclasico", name: "TuCineClasico", bases: ["https://online.tucineclasico.es"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "cinetimes", name: "CineTimes", bases: ["https://cinetimes.org"], search: ["/?s={q}"], mode: "wp", extra: true },
+    { id: "historiadelcine", name: "HistoriaDelCine", bases: ["https://online.historiadelcine.es"], search: ["/?s={q}"], mode: "wp", extra: true }
 ];
 
 function siteFind(site, ctx) {
