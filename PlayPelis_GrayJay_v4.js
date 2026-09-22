@@ -742,8 +742,11 @@ function scoreLink(c, ctx) {
             var w = want[j], s = 0;
             if (t == w) s = 100;
             else if (t.indexOf(w) >= 0 || w.indexOf(t) >= 0) {
+                /* "Rebelde" adentro de "Rebelde Way" (ratio 0.63) enganchaba cualquier
+                   resultado corto de busqueda; exigir un solapamiento fuerte evita que
+                   un titulo truncado o un enlace de menu se acepte como coincidencia. */
                 var r = Math.min(t.length, w.length) / Math.max(t.length, w.length);
-                s = r >= 0.6 ? 60 + r * 30 : 0;
+                s = r >= 0.85 ? 60 + r * 30 : 0;
             }
             if (s > best) best = s;
         }
@@ -1343,21 +1346,6 @@ function searchPage(q, page) {
 /* detalles                                                            */
 /* ------------------------------------------------------------------ */
 
-function episodeLinksText(id, curSeason, curEpisode) {
-    var d = getShow(id), seasons = seasonList(d), lines = [], i, j, cap = 0;
-    for (i = 0; i < seasons.length && cap < 250; i++) {
-        var sn = seasons[i], sd = tmdbGet("/tv/" + id + "/season/" + sn, "es-AR");
-        if (!sd || !sd.episodes) continue;
-        for (j = 0; j < sd.episodes.length && cap < 250; j++) {
-            var en = sd.episodes[j].episode_number, name = sd.episodes[j].name || ("Episodio " + en);
-            if (sn == curSeason && en == curEpisode) lines.push("\u25b6 T" + sn + "E" + en + " - " + name + " (reproduciendo)");
-            else lines.push("T" + sn + "E" + en + " - " + name + ": " + makeTvUrl(id, sn, en));
-            cap++;
-        }
-    }
-    return lines;
-}
-
 function errorDetails(url, msg) {
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, "error", PID), name: "PelisHub: " + msg, thumbnails: new Thumbnails([]), author: tmdbAuthor(),
@@ -1392,6 +1380,11 @@ function details(url) {
         if (sd && sd.episodes) for (i = 0; i < sd.episodes.length; i++) {
             if (sd.episodes[i].episode_number == ctx.episode) { epName = sd.episodes[i].name || ""; epOverview = sd.episodes[i].overview || ""; epDate = unixOf(sd.episodes[i].air_date); runtime = (sd.episodes[i].runtime || 0) * 60; }
         }
+        if (!epName) {
+            /* TMDB no siempre tiene el nombre del episodio traducido al espanol */
+            var sdEn = tmdbGet("/tv/" + p.id + "/season/" + ctx.season, "en-US");
+            if (sdEn && sdEn.episodes) for (i = 0; i < sdEn.episodes.length; i++) if (sdEn.episodes[i].episode_number == ctx.episode) epName = sdEn.episodes[i].name || "";
+        }
     } else runtime = (base.runtime || 0) * 60;
 
     var sources = collectSources(ctx);
@@ -1399,10 +1392,10 @@ function details(url) {
 
     var name = isTv ? (title + " \u00b7 S" + ctx.season + "E" + ctx.episode + (epName ? " \u00b7 " + epName : "")) : (title + (ctx.year ? " (" + ctx.year + ")" : ""));
     var desc = (isTv && epOverview ? epOverview : (base.overview || "")) + "\n\nFuentes: " + sources.length + (sources.length ? "" : " (no se encontr\u00f3 ninguna reproducible)");
-    if (isTv) {
-        var epLines = episodeLinksText(p.id, ctx.season, ctx.episode);
-        if (epLines.length) desc += "\n\n--- Episodios (tocar el link para cambiar) ---\n" + epLines.join("\n");
-    }
+    /* NOTA: un texto "pelishub://..." en la descripcion NO es tocable en GrayJay (solo
+       autodetecta http/https), asi que no sirve como reemplazo de los botones ant/sig.
+       La forma real de saltar de episodio es la lista de "Recomendados" (getContentRecommendations,
+       mas abajo), que GrayJay muestra como videos tocables fuera del panel de Description. */
     if (debugMode()) desc += "\n\n=== DEBUG ===\n" + _debug;
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, isTv ? ("tv_" + p.id + "_" + ctx.season + "_" + ctx.episode) : ("movie_" + p.id), PID),
