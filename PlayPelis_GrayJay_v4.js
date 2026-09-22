@@ -34,6 +34,10 @@ var MAX_CAND = 8;          /* embeds a resolver por proveedor */
 var WANT_SERVERS = 3;      /* servidores distintos que resolvieron: con esto se corta la busqueda (salvo "sitios extra") */
 var BUDGET_MS = 50000;     /* tiempo maximo por pelicula/episodio */
 
+var PLPRO_BASE = "https://plpro.org";
+var PLPRO_USER = "p";
+var PLPRO_PASS = "p";
+
 var _settings = {};
 var _debug = "";
 var _fail = {};
@@ -45,6 +49,7 @@ function resetDebug() { _debug = ""; }
 function budgetLeft() { return Date.now() < _deadline; }
 function startBudget() { _deadline = Date.now() + BUDGET_MS; }
 function extraSites() { var v = _settings && _settings.extraSites; return v === true || v === "true" || v === 1 || v === "1"; }
+function debugMode() { var v = _settings && _settings.debugMode; return v === true || v === "true" || v === 1 || v === "1"; }
 
 /* ------------------------------------------------------------------ */
 /* utilidades de texto                                                 */
@@ -1061,6 +1066,41 @@ function provSite(site, ctx) {
 }
 
 /* ------------------------------------------------------------------ */
+/* PlPro.org (API propia, ultimo recurso si nada del scraping resulta) */
+/* ------------------------------------------------------------------ */
+
+function plproGet(path) {
+    var sep = path.indexOf("?") >= 0 ? "&" : "?";
+    var url = PLPRO_BASE + path + sep + "username=" + enc(PLPRO_USER) + "&password=" + enc(PLPRO_PASS);
+    var b = httpGet(url, PLPRO_BASE + "/", { "User-Agent": "PLPro/8" });
+    return parseJson(b);
+}
+function provPlPro(ctx) {
+    var isTv = ctx.kind == "tv", data = plproGet(isTv ? "/series" : "/movies/resume");
+    var list = data && (isTv ? data.series : data.movies);
+    if (!list || !list.length) { log("  plpro: catalogo no disponible"); return []; }
+    var links = [], i;
+    for (i = 0; i < list.length; i++) {
+        var x = list[i];
+        if (!x || !x.a) continue;
+        links.push({ url: "plpro:" + x.a, titles: [x.b || "", x.i || ""], type: isTv ? "tv" : "movie", year: x.f ? String(x.f) : "" });
+    }
+    var best = pickBest(links, ctx);
+    if (!best) { log("  plpro: sin coincidencia en su cat\u00e1logo (" + list.length + " t\u00edtulos)"); return []; }
+    var id = best.url.split(":")[1];
+    var raw = isTv ? plproGet("/series/" + id + "/links/" + ctx.season + "/" + ctx.episode) : plproGet("/movies/" + id + "/links");
+    if (!raw || !raw.length) { log("  plpro: id=" + id + " sin links"); return []; }
+    var cands = [], j;
+    for (j = 0; j < raw.length && cands.length < 12; j++) {
+        var l = raw[j];
+        if (!l || !l.a) continue;
+        cands.push(mkCand(l.a, langOf(l.b || l.c || ""), PLPRO_BASE + "/", "PlPro"));
+    }
+    log("  plpro: id=" + id + " -> " + cands.length + " candidatos");
+    return cands;
+}
+
+/* ------------------------------------------------------------------ */
 /* orquestador                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -1070,6 +1110,10 @@ function collectSources(ctx) {
     plan.push({ n: "Cuevana3", f: provCuevana });
     function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
     for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
+    plan.push({ n: "PlPro", f: function () {
+        if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
+        return provPlPro(ctx);
+    } });
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
         if (servers >= WANT_SERVERS && !extraSites()) { log("Suficientes servidores (" + servers + "), no se buscan mas sitios"); break; }
@@ -1188,7 +1232,7 @@ function jkDetails(url) {
         author: jkAuthor(),
         uploadDate: 0, duration: 0, viewCount: 0, isLive: false,
         url: jkMakeEpisode(p.slug, num),
-        description: (info.synopsis || "") + "\n\nFuentes: " + sources.length + "\n\n=== DEBUG ===\n" + _debug,
+        description: (info.synopsis || "") + "\n\nFuentes: " + sources.length + (debugMode() ? ("\n\n=== DEBUG ===\n" + _debug) : ""),
         video: new VideoSourceDescriptor(sources)
     });
 }
@@ -1299,6 +1343,21 @@ function searchPage(q, page) {
 /* detalles                                                            */
 /* ------------------------------------------------------------------ */
 
+function episodeLinksText(id, curSeason, curEpisode) {
+    var d = getShow(id), seasons = seasonList(d), lines = [], i, j, cap = 0;
+    for (i = 0; i < seasons.length && cap < 250; i++) {
+        var sn = seasons[i], sd = tmdbGet("/tv/" + id + "/season/" + sn, "es-AR");
+        if (!sd || !sd.episodes) continue;
+        for (j = 0; j < sd.episodes.length && cap < 250; j++) {
+            var en = sd.episodes[j].episode_number, name = sd.episodes[j].name || ("Episodio " + en);
+            if (sn == curSeason && en == curEpisode) lines.push("\u25b6 T" + sn + "E" + en + " - " + name + " (reproduciendo)");
+            else lines.push("T" + sn + "E" + en + " - " + name + ": " + makeTvUrl(id, sn, en));
+            cap++;
+        }
+    }
+    return lines;
+}
+
 function errorDetails(url, msg) {
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, "error", PID), name: "PelisHub: " + msg, thumbnails: new Thumbnails([]), author: tmdbAuthor(),
@@ -1339,7 +1398,12 @@ function details(url) {
     log("TOTAL fuentes: " + sources.length);
 
     var name = isTv ? (title + " \u00b7 S" + ctx.season + "E" + ctx.episode + (epName ? " \u00b7 " + epName : "")) : (title + (ctx.year ? " (" + ctx.year + ")" : ""));
-    var desc = (isTv && epOverview ? epOverview : (base.overview || "")) + "\n\nFuentes: " + sources.length + (sources.length ? "" : " (no se encontr\u00f3 ninguna reproducible)") + "\n\n=== DEBUG ===\n" + _debug;
+    var desc = (isTv && epOverview ? epOverview : (base.overview || "")) + "\n\nFuentes: " + sources.length + (sources.length ? "" : " (no se encontr\u00f3 ninguna reproducible)");
+    if (isTv) {
+        var epLines = episodeLinksText(p.id, ctx.season, ctx.episode);
+        if (epLines.length) desc += "\n\n--- Episodios (tocar el link para cambiar) ---\n" + epLines.join("\n");
+    }
+    if (debugMode()) desc += "\n\n=== DEBUG ===\n" + _debug;
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, isTv ? ("tv_" + p.id + "_" + ctx.season + "_" + ctx.episode) : ("movie_" + p.id), PID),
         name: name,
