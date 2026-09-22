@@ -40,22 +40,15 @@ var PLPRO_PASS = "p";
 
 var _settings = {};
 var _debug = "";
-var _fail = {};
+var _fail = {};        /* host -> {count, at} */
 var _okh = {};
+var FAIL_EXPIRE_MS = 20000;   /* un host "caido" se vuelve a probar solo despues de este tiempo sin fallar */
 var _deadline = 0;
 
 function log(s) { _debug += String(s) + "\n"; }
 function resetDebug() { _debug = ""; }
 function budgetLeft() { return Date.now() < _deadline; }
-function startBudget() {
-    _deadline = Date.now() + BUDGET_MS;
-    /* el estado de "host caido" solo vale para ESTA busqueda: si no se reinicia aca,
-       un fallo transitorio (timeout, rate-limit puntual) de una pelicula anterior deja
-       ese dominio bloqueado para SIEMPRE en la sesion, aunque funcione perfectamente
-       para el resto de los titulos. */
-    _fail = {};
-    _okh = {};
-}
+function startBudget() { _deadline = Date.now() + BUDGET_MS; }
 function extraSites() { var v = _settings && _settings.extraSites; return v === true || v === "true" || v === 1 || v === "1"; }
 function debugMode() { var v = _settings && _settings.debugMode; return v === true || v === "true" || v === 1 || v === "1"; }
 
@@ -166,8 +159,21 @@ function hdr(referer, extra) {
     if (extra) for (k in extra) if (extra.hasOwnProperty(k)) h[k] = extra[k];
     return h;
 }
-function markFail(h) { _fail[h] = (_fail[h] || 0) + 1; }
-function hostDead(h) { return (_fail[h] || 0) >= 2 && !_okh[h]; }
+function markFail(h) {
+    var e = _fail[h];
+    if (!e || Date.now() - e.at > FAIL_EXPIRE_MS) e = { count: 0, at: 0 };
+    e.count++; e.at = Date.now();
+    _fail[h] = e;
+}
+function hostDead(h) {
+    /* NO se limpia con un reset global (evita pisar el estado de otra busqueda que
+       pueda estar corriendo al mismo tiempo); un fallo se "olvida" solo, pasado
+       FAIL_EXPIRE_MS sin fallar de nuevo. Esto evita que un tropezon puntual (timeout,
+       rate-limit) deje un dominio bloqueado para el resto de la sesion. */
+    var e = _fail[h];
+    if (!e || Date.now() - e.at > FAIL_EXPIRE_MS) return false;
+    return e.count >= 2 && !_okh[h];
+}
 
 function httpGet(url, referer, extra) {
     var h = hostOf(url), r, b;
