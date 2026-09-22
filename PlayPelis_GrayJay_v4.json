@@ -6,19 +6,30 @@
   "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
   "scriptUrl": "./PlayPelis_GrayJay_v4.js",
-  "version": 6,
+  "version": 7,
   "iconUrl": "./icon.png",
   "id": "b7a2e4c1-3d5f-4e8a-9c26-1f0d7a5b8e34",
   "scriptSignature": "",
   "scriptPublicKey": "",
-  "packages": ["Http"],
+  "packages": [
+    "Http"
+  ],
   "allowEval": false,
-  "allowUrls": ["everywhere"],
+  "allowUrls": [
+    "everywhere"
+  ],
   "settings": [
     {
       "variable": "extraSites",
       "name": "Buscar en sitios extra",
       "description": "Agrega Gnula, EntrePeliculas, SmartPelis, PelisPlay y PelisPlus2. Es más lento.",
+      "type": "Boolean",
+      "default": "false"
+    },
+    {
+      "variable": "debugMode",
+      "name": "Modo diagnostico",
+      "description": "Agrega el reporte tecnico (=== DEBUG ===) al final de la descripcion, para diagnosticar por que una pelicula/serie no encuentra fuentes.",
       "type": "Boolean",
       "default": "false"
     }
