@@ -938,6 +938,7 @@ function provCuevana(ctx) {
 /* ------------------------------------------------------------------ */
 
 var SITES = [
+    { id: "poseidonhd", name: "PoseidonHD", bases: ["https://www.poseidonhd2.co"], search: ["/?s={q}"], mode: "wp" }, /* prioridad alta: confirmado por el usuario con muy buena cobertura de TMDB */
     { id: "pelisplus", name: "PelisPlus", bases: ["https://pelisplushd.bz", "https://pelisplushd.nu", "https://pelisplusgo.vip"], search: ["/search?s={q}", "/search/{q}/1"], mode: "pelisplus" },
     { id: "pelishouse", name: "PelisHouse", bases: ["https://pelishouse.com"], search: ["/?s={q}"], mode: "wp" },
     { id: "cinetux", name: "Cinetux", bases: ["https://www.cinetux.nu"], search: ["/?s={q}"], mode: "wp" },
@@ -961,7 +962,6 @@ var SITES = [
     { id: "vien2pelis", name: "Vien2Pelis", bases: ["https://vien2pelis.net"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "cineplus123", name: "CinePlus123", bases: ["https://cineplus123.org"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "pelispop", name: "PelisPop", bases: ["https://pelispop.mov"], search: ["/?s={q}"], mode: "wp", extra: true },
-    { id: "poseidonhd", name: "PoseidonHD", bases: ["https://www.poseidonhd2.co"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "peelink2", name: "Peelink2", bases: ["https://www.peelink2.com"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "verpeliculasultra", name: "VerPeliculasUltra", bases: ["https://verpeliculasultra.com"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "pelisenhd", name: "PelisEnHD", bases: ["https://pelisenhd.me"], search: ["/?s={q}"], mode: "wp", extra: true },
