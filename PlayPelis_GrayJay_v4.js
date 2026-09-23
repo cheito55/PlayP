@@ -31,7 +31,9 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
 var MAX_CAND = 8;          /* embeds a resolver por proveedor */
-var WANT_SERVERS = 3;      /* servidores distintos que resolvieron: con esto se corta la busqueda (salvo "sitios extra") */
+var WANT_SERVERS = 1;      /* PRUEBA: con 1 se corta apenas el primer proveedor (PelisJuanita) resuelve algo,
+                               en vez de seguir probando Cuevana3/sitios WP solo por variedad de idioma/servidor.
+                               Si PelisJuanita no encuentra nada, sigue de largo con el resto como siempre. */
 var BUDGET_MS = 50000;     /* tiempo maximo por pelicula/episodio */
 
 var PLPRO_BASE = "https://plpro.org";
