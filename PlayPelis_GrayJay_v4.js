@@ -324,6 +324,14 @@ function unpackAll(text) {
     return out;
 }
 
+/* archivos que aparecen en el HTML pero no son el contenido real (intros,
+   bumpers, previews que viven en carpetas de assets/imagenes del sitio) */
+function isJunkMedia(u) {
+    u = String(u || "").toLowerCase();
+    if (/\/(?:img|images|imgs|assets|static|icons?)\//.test(u)) return true;
+    if (/\b(?:intro|bumper|trailer|preview|loading|placeholder|sample)\b/.test(u)) return true;
+    return false;
+}
 /* busca m3u8/mp4 en un texto (y en su version desempaquetada) */
 function scanMedia(text, label, ref, pageUrl) {
     var out = [], texts = [String(text || "")], i, m, s, re, base = originOf(pageUrl);
@@ -332,12 +340,13 @@ function scanMedia(text, label, ref, pageUrl) {
     for (i = 0; i < texts.length; i++) {
         var t = texts[i].replace(/\\\//g, "/").replace(/\\u0026/g, "&").replace(/\\u002F/gi, "/");
         re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi;
-        while ((m = re.exec(t)) != null) addSrc(out, mkSrc(m[0], label, ref));
+        while ((m = re.exec(t)) != null) { if (!isJunkMedia(m[0])) addSrc(out, mkSrc(m[0], label, ref)); }
         re = /["']?(?:file|src|source|hls\d*|url|link|stream|playlist)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi;
         while ((m = re.exec(t)) != null) {
             var v = m[1];
             if (v.charAt(0) == "/" && v.charAt(1) != "/" && base) v = base + v;
             else if (v.indexOf("//") === 0) v = "https:" + v;
+            if (isJunkMedia(v)) continue;
             s = mkSrc(v, label, ref);
             if (s) addSrc(out, s);
         }
@@ -668,6 +677,26 @@ function discoverLinks(html, pageUrl) {
     return out;
 }
 
+function exVimeus(url, label, ref) {
+    /* "vimeus.com" no es Vimeo real: la pagina se arma con JS del lado del
+       cliente, asi que el escaneo generico es lo unico que podemos hacer.
+       PRUEBA: los CDN que reparte (vimeos.zip) devuelven "no autorizado" al
+       reproducir, lo que huele a chequeo de Referer/Origin estricto contra
+       el link completo (con view_key y demas parametros). Ac\u00e1 se usa el
+       origen "limpio" (https://vimeus.com/) como Referer del propio archivo
+       de video, en vez de la URL completa del embed, por si el CDN valida
+       solo host+esquema y no la query exacta. */
+    var pageRef = ref || (originOf(url) + "/"), mediaRef = originOf(url) + "/";
+    var h = httpGet(url, pageRef);
+    if (!h) return [];
+    var out = scanMedia(h, label, mediaRef, url);
+    if (out.length) return out;
+    out = voeFromHtml(h, url, label);
+    if (out.length) return out;
+    var links = discoverLinks(h, url), i;
+    for (i = 0; i < links.length && !out.length && budgetLeft(); i++) out = out.concat(resolveEmbed(links[i], label, url, 1));
+    return out;
+}
 function exGeneric(url, label, ref, depth) {
     var h = httpGet(url, ref || (originOf(url) + "/")), out, i, links;
     if (!h) return [];
@@ -715,12 +744,8 @@ function resolveEmbed(url, label, ref, depth) {
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
     if (h.indexOf("vimeus.") >= 0) {
-        /* NUEVO: "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
-           JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
-           Lo dejamos pasar por el generico pero registrando bien el intento para
-           poder afinarlo con datos reales del debug (log de resolveCands). */
-        log("    vimeus: host no-Vimeo real, usando extractor generico");
-        return exGeneric(url, label, ref, depth);
+        log("    vimeus: host no-Vimeo real, probando referer de origen limpio");
+        return exVimeus(url, label, ref);
     }
     return exGeneric(url, label, ref, depth);
 }
@@ -865,7 +890,7 @@ function parseJuanita(html, base) {
     return out;
 }
 function provJuanita(ctx) {
-    var base = "https://pelisjuanita.com", slugs = [], urls = [], i, raw = [ctx.titleEn, ctx.titleEs, ctx.titleOrig];
+    var base = "https://pelisjuanita.com", slugs = [], urls = [], i, raw = [ctx.titleEs, ctx.titleEn, ctx.titleOrig];
     for (i = 0; i < raw.length; i++) { var s = slugJuanita(raw[i]); if (s) { slugs.push(s); slugs.push(trimDash(s)); } }
     slugs = uniq(slugs).slice(0, 4);
     for (i = 0; i < slugs.length; i++) {
@@ -873,21 +898,30 @@ function provJuanita(ctx) {
             : base + "/series/serieInfo.php?nombreSerie=" + slugs[i] + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode);
     }
     /* pagina "ver-serie" (la que da el usuario): puede traer el reproductor con otro
-       marcado, distinto del fragmento AJAX de serieInfo.php */
-    var verSerieIdx = -1;
-    if (ctx.kind == "tv" && slugs.length) { verSerieIdx = urls.length; urls.push(base + "/series/ver-serie/" + slugs[0]); }
+       marcado, distinto del fragmento AJAX de serieInfo.php. Se prueba con TODOS los
+       slugs (no solo el primero), porque el sitio suele usar el slug del titulo en
+       espanol para esta URL aunque serieInfo.php haya fallado con ese mismo slug. */
+    var verSerieStart = -1, verSerieCount = 0;
+    if (ctx.kind == "tv" && slugs.length) {
+        verSerieStart = urls.length;
+        for (i = 0; i < slugs.length; i++) { urls.push(base + "/series/ver-serie/" + slugs[i]); verSerieCount++; }
+    }
     var bodies = batchGet(urls, base + "/");
     for (i = 0; i < bodies.length; i++) {
-        if (i == verSerieIdx) continue;
+        if (verSerieStart >= 0 && i >= verSerieStart) continue;
         var items = parseJuanita(bodies[i], base);
         if (items.length) { log("  slug OK: " + urls[i]); return items; }
     }
-    if (verSerieIdx >= 0 && bodies[verSerieIdx]) {
-        var vs = bodies[verSerieIdx], out = [], links = discoverLinks(vs, urls[verSerieIdx]), j;
-        for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
-        var direct = scanMedia(vs, "", base + "/", base + "/"), k;
-        for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
-        if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
+    if (verSerieStart >= 0) {
+        for (i = verSerieStart; i < verSerieStart + verSerieCount; i++) {
+            var vs = bodies[i];
+            if (!vs) continue;
+            var out = [], links = discoverLinks(vs, urls[i]), j;
+            for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
+            var direct = scanMedia(vs, "", base + "/", base + "/"), k;
+            for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
+            if (out.length) { log("  ver-serie OK: " + urls[i] + " -> " + out.length + " candidato(s)"); return out; }
+        }
     }
     log("  slugs probados: " + slugs.join(", "));
     return [];
@@ -1044,6 +1078,68 @@ var SITES = [
     { id: "cinetimes", name: "CineTimes", bases: ["https://cinetimes.org"], search: ["/?s={q}"], mode: "wp", extra: true },
     { id: "historiadelcine", name: "HistoriaDelCine", bases: ["https://online.historiadelcine.es"], search: ["/?s={q}"], mode: "wp", extra: true }
 ];
+
+/* ------------------------------------------------------------------ */
+/* PoseidonHD (por TMDB, URL directa: /serie|pelicula/<tmdb_id>/<slug>)  */
+/* ------------------------------------------------------------------ */
+
+function poseidonSlug(t) { return slugCuevana(t); }
+function poseidonEpUrl(base, id, slug, s, e) { return base + "/serie/" + id + "/" + slug + "/temporada/" + s + "/episodio/" + e; }
+function poseidonSeasonUrl(base, id, slug, s) { return base + "/serie/" + id + "/" + slug + "/temporada/" + s; }
+function poseidonMovieUrl(base, id, slug) { return base + "/pelicula/" + id + "/" + slug; }
+
+function provPoseidon(site, ctx) {
+    if (!ctx.id) return [];
+    var base = site.bases[0], slugs = uniq([poseidonSlug(ctx.titleOrig), poseidonSlug(ctx.titleEn), poseidonSlug(ctx.titleEs)]).slice(0, 3), i;
+    if (!slugs.length) return [];
+
+    if (ctx.kind == "movie") {
+        var mUrls = [], j;
+        for (i = 0; i < slugs.length; i++) mUrls.push(poseidonMovieUrl(base, ctx.id, slugs[i]));
+        var mBodies = batchGet(mUrls, base + "/");
+        for (i = 0; i < mBodies.length; i++) {
+            if (!mBodies[i]) continue;
+            var mc = pageCandidates(mBodies[i], mUrls[i], base, site, ctx);
+            log("  " + mUrls[i].substring(0, 100) + " -> " + mc.length + " candidatos");
+            if (mc.length) return mc;
+        }
+        return [];
+    }
+
+    /* serie: 1) probar el link directo con episodio incluido */
+    var epUrls = [];
+    for (i = 0; i < slugs.length; i++) epUrls.push(poseidonEpUrl(base, ctx.id, slugs[i], ctx.season, ctx.episode));
+    var epBodies = batchGet(epUrls, base + "/");
+    for (i = 0; i < epBodies.length; i++) {
+        if (!epBodies[i]) continue;
+        var ec = pageCandidates(epBodies[i], epUrls[i], base, site, ctx);
+        log("  " + epUrls[i].substring(0, 100) + " -> " + ec.length + " candidatos");
+        if (ec.length) return ec;
+    }
+
+    /* 2) plan B: bajar la pagina de temporada (formato confirmado por el usuario)
+       y buscar ahi el link del episodio, con soporte para "temporada/S/episodio/E"
+       (con barras) ademas del formato con guiones que ya cubre episodeLink(). */
+    var sUrls = [];
+    for (i = 0; i < slugs.length; i++) sUrls.push(poseidonSeasonUrl(base, ctx.id, slugs[i], ctx.season));
+    var sBodies = batchGet(sUrls, base + "/");
+    for (i = 0; i < sBodies.length; i++) {
+        if (!sBodies[i]) continue;
+        var ep = episodeLink(sBodies[i], base, ctx.season, ctx.episode);
+        if (!ep) {
+            var re = /<a\b[^>]*href=["']([^"']+)["']/gi, m, want = new RegExp("temporada/0*" + ctx.season + "/episodio/0*" + ctx.episode + "(?:[/?#]|$)", "i");
+            while ((m = re.exec(sBodies[i])) != null) { if (want.test(m[1])) { ep = absUrl(m[1], base); break; } }
+        }
+        if (!ep) continue;
+        var eh = httpGet(ep, sUrls[i]);
+        if (!eh) continue;
+        var c2 = pageCandidates(eh, ep, base, site, ctx);
+        log("  " + ep.substring(0, 100) + " -> " + c2.length + " candidatos");
+        if (c2.length) return c2;
+    }
+    log("  poseidon: no se encontr\u00f3 " + ctx.season + "x" + ctx.episode + " con id " + ctx.id);
+    return [];
+}
 
 function siteFind(site, ctx) {
     var qs = uniq([ctx.titleEs, ctx.titleEn]).slice(0, 2), bi, qi, pi;
@@ -1246,7 +1342,10 @@ function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
     plan.push({ n: "PelisJuanita", f: provJuanita });
     plan.push({ n: "Cuevana3", f: provCuevana });
-    function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
+    function mk(site) {
+        if (site.id == "poseidonhd") return { n: site.name, f: function () { return provPoseidon(site, ctx); } };
+        return { n: site.name, f: function () { return provSite(site, ctx); } };
+    }
     for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
     plan.push({ n: "PlPro", f: function () {
         if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
