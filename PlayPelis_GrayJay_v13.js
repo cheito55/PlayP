@@ -31,7 +31,9 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
 var MAX_CAND = 8;          /* embeds a resolver por proveedor */
-var WANT_SERVERS = 3;      /* servidores distintos que resolvieron: con esto se corta la busqueda (salvo "sitios extra") */
+var WANT_SERVERS = 1;      /* PRUEBA: con 1 se corta apenas el primer proveedor (PelisJuanita) resuelve algo,
+                               en vez de seguir probando Cuevana3/sitios WP solo por variedad de idioma/servidor.
+                               Si PelisJuanita no encuentra nada, sigue de largo con el resto como siempre. */
 var BUDGET_MS = 50000;     /* tiempo maximo por pelicula/episodio */
 
 var PLPRO_BASE = "https://plpro.org";
@@ -344,147 +346,6 @@ function scanMedia(text, label, ref, pageUrl) {
 }
 
 /* ------------------------------------------------------------------ */
-/* WEBPROBE: detector rapido de media para sitios web controlados      */
-/* No intercepta la red de Android: inspecciona la pagina/iframes/JS   */
-/* que el plugin descarga y busca los manifiestos que usaria el player. */
-/* ------------------------------------------------------------------ */
-var WEBPROBE_SITES = [
-    "pelisjuanita.com",
-    "poseidonhd2",
-    "cuevana3",
-    "pelishouse",
-    "cinetux"
-];
-var WEBPROBE_MAX_FRAMES = 6;
-var WEBPROBE_MAX_SCRIPTS = 4;
-var WEBPROBE_MAX_DEPTH = 2;
-var WEBPROBE_MAX_TEXT = 1200000;
-
-function webProbeAllowed(url) {
-    /* Solo la pagina inicial debe pertenecer a nuestra lista. Los recursos
-       del reproductor pueden vivir en otro dominio (Vimeo/VOE/CDN/etc.). */
-    var h = hostOf(url), i;
-    if (!h) return false;
-    for (i = 0; i < WEBPROBE_SITES.length; i++) {
-        if (h == WEBPROBE_SITES[i] || h.indexOf(WEBPROBE_SITES[i] + ".") == 0 || h.indexOf("." + WEBPROBE_SITES[i] + ".") >= 0) return true;
-    }
-    return false;
-}
-function webProbeResourceAllowed(url) {
-    var h = hostOf(url);
-    if (!h || !/^https?:\/\//i.test(String(url || ""))) return false;
-    /* No volver a meter recursos obvios (imagenes/css/fonts/analytics). */
-    if (/\.(?:jpg|jpeg|png|gif|webp|svg|ico|css|woff2?|ttf|otf)(?:[?#]|$)/i.test(url)) return false;
-    if (/google-analytics|googletagmanager|doubleclick|facebook\.com|twitter\.com|cloudflareinsights/i.test(h)) return false;
-    return true;
-}
-function webProbeClean(u, base) {
-    u = String(u || "").replace(/\\u0026/gi, "&").replace(/\\u002F/gi, "/").replace(/\\\//g, "/");
-    u = u.replace(/[\\"'<>),;]+$/g, "");
-    if (u.indexOf("\\u003A") >= 0) u = u.replace(/\\u003A/gi, ":");
-    if (u.indexOf("\\u003F") >= 0) u = u.replace(/\\u003F/gi, "?");
-    if (u.indexOf("\\u003D") >= 0) u = u.replace(/\\u003D/gi, "=");
-    if (u.indexOf("//") === 0) u = "https:" + u;
-    return absUrl(u, base);
-}
-function webProbeMedia(text, pageUrl, label, out) {
-    var t = String(text || "").substring(0, WEBPROBE_MAX_TEXT), re, m, u, k;
-    if (!t) return;
-    t = t.replace(/\\x2f/gi, "/").replace(/\\x3a/gi, ":").replace(/\\x3f/gi, "?").replace(/\\x3d/gi, "=");
-    /* URLs absolutas y relativas con extensiones de manifiesto/media. */
-    re = /(?:https?:)?\/\/[^\s"'<>\\]+?\.(?:m3u8|mpd|mp4)(?:\?[^\s"'<>\\]*)?/gi;
-    while ((m = re.exec(t)) != null) {
-        u = webProbeClean(m[0], pageUrl);
-        if (/\.m3u8(?:[?#]|$)/i.test(u)) addSrc(out, mkSrc(u, label + " HLS", pageUrl, "hls"));
-        else if (/\.mp4(?:[?#]|$)/i.test(u)) addSrc(out, mkSrc(u, label + " MP4", pageUrl, "mp4"));
-    }
-    /* Campos habituales de players: file/src/source/url/hls/playlist/manifest. */
-    re = /(?:file|src|source|url|stream|hls|hls_url|playlist|manifest|video_url|master)["\']?\s*[:=]\s*["\']([^"\']+)["\']/gi;
-    while ((m = re.exec(t)) != null) {
-        u = webProbeClean(m[1], pageUrl);
-        if (!/^https?:\/\//i.test(u)) continue;
-        if (/\.m3u8(?:[?#]|$)/i.test(u)) addSrc(out, mkSrc(u, label + " HLS", pageUrl, "hls"));
-        else if (/\.mp4(?:[?#]|$)/i.test(u)) addSrc(out, mkSrc(u, label + " MP4", pageUrl, "mp4"));
-    }
-    /* JSON incrustado: no exige extension en la clave, pero sí en el valor. */
-    re = /["']([^"']+(?:\.m3u8|\.mpd|\.mp4)(?:\?[^"']*)?)["']/gi;
-    while ((m = re.exec(t)) != null) {
-        u = webProbeClean(m[1], pageUrl);
-        if (/\.m3u8(?:[?#]|$)/i.test(u)) addSrc(out, mkSrc(u, label + " HLS", pageUrl, "hls"));
-        else if (/\.mp4(?:[?#]|$)/i.test(u)) addSrc(out, mkSrc(u, label + " MP4", pageUrl, "mp4"));
-    }
-    /* Algunos players esconden las URLs en P.A.C.K.E.R. */
-    var packed = unpackAll(t), i;
-    for (i = 0; i < packed.length; i++) webProbeMedia(packed[i], pageUrl, label + " unpack", out);
-}
-function webProbeFrames(html, pageUrl) {
-    var out = [], tags = findTags(html, /^<iframe\b/i), i, a, u;
-    for (i = 0; i < tags.length && out.length < WEBPROBE_MAX_FRAMES; i++) {
-        a = attrsOf(tags[i].tag);
-        u = a["data-src"] || a["src"] || a["data-url"] || "";
-        u = webProbeClean(u, pageUrl);
-        if (!/^https?:\/\//i.test(u) || u == pageUrl) continue;
-        if (out.indexOf(u) < 0) out.push(u);
-    }
-    return out;
-}
-function webProbeScripts(html, pageUrl) {
-    var out = [], tags = findTags(html, /^<script\b/i), i, a, u;
-    for (i = 0; i < tags.length && out.length < WEBPROBE_MAX_SCRIPTS; i++) {
-        a = attrsOf(tags[i].tag);
-        u = webProbeClean(a["src"] || "", pageUrl);
-        if (!/^https?:\/\//i.test(u)) continue;
-        if (out.indexOf(u) < 0) out.push(u);
-    }
-    return out;
-}
-function webProbePage(pageUrl, ref, label, html, depth) {
-    var out = [], frames, scripts, urls = [], i, bodies = [], body, j;
-    depth = depth || 0;
-    if (!webProbeAllowed(pageUrl) || !budgetLeft()) return out;
-    html = html || httpGet(pageUrl, ref || (originOf(pageUrl) + "/"));
-    if (!html) return out;
-
-    webProbeMedia(html, pageUrl, label || "WebProbe", out);
-    /* El scanner normal sigue siendo util: recupera formatos que ya conoce. */
-    var normal = scanMedia(html, label || "WebProbe", pageUrl, pageUrl);
-    for (i = 0; i < normal.length; i++) addSrc(out, normal[i]);
-
-    frames = webProbeFrames(html, pageUrl);
-    scripts = webProbeScripts(html, pageUrl);
-    for (i = 0; i < frames.length; i++) urls.push(frames[i]);
-    for (i = 0; i < scripts.length; i++) urls.push(scripts[i]);
-    urls = uniq(urls);
-
-    /* Batch: varias inspecciones independientes salen en paralelo. */
-    if (urls.length && budgetLeft()) {
-        try { bodies = batchGet(urls, pageUrl); } catch (e) { bodies = []; log("  webprobe batch: " + e); }
-    }
-    for (i = 0; i < urls.length && i < WEBPROBE_MAX_FRAMES + WEBPROBE_MAX_SCRIPTS && budgetLeft(); i++) {
-        body = bodies[i] || "";
-        if (!body) continue;
-        webProbeMedia(body, urls[i], label || "WebProbe", out);
-        /* Si el recurso es un player/embed, dejar que los extractores existentes
-           lo resuelvan. Esto cubre URLs sin extension .m3u8/.mp4. */
-        if (i < frames.length && webProbeResourceAllowed(urls[i])) {
-            try {
-                var rr = resolveEmbed(urls[i], label + " WebProbe", pageUrl, depth + 1), ri;
-                for (ri = 0; ri < rr.length; ri++) addSrc(out, rr[ri]);
-            } catch (re) { log("    webprobe resolve: " + re); }
-        }
-        /* Un iframe de reproductor normalmente sale del dominio del sitio.
-           La version anterior lo descartaba aqui porque webProbeAllowed()
-           solo aceptaba los cinco dominios raiz; por eso el "interceptor"
-           no llegaba al player real. */
-        if (depth < WEBPROBE_MAX_DEPTH && /<iframe\b/i.test(body) && webProbeResourceAllowed(urls[i])) {
-            var nested = webProbePage(urls[i], pageUrl, label || "WebProbe", body, depth + 1);
-            for (j = 0; j < nested.length; j++) addSrc(out, nested[j]);
-        }
-    }
-    return out;
-}
-
-/* ------------------------------------------------------------------ */
 /* hosts de embeds                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -492,7 +353,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "dood.", "doodstream.", "dooood.", "uqload.", "voe.sx", "streamtape.", "upstream.to", "streamlare.", "plusvip.net", "sololatino.net", "zplayer.live", "fastream.to", "vidcloud9.org",
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
-    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3"];
+    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus."];
 var UNSUPPORTED = ["waaw.", "netu.", "hqq.", "younetu.", "hqtv.", "biribup.", "cuevana3.download"];
 
 function hostMatches(h, list) {
@@ -558,7 +419,13 @@ function voeFromHtml(h, pageUrl, label) {
             if (!/^https?:/i.test(v)) { var d = b64decode(v); if (/^https?:/i.test(d)) v = d; }
             addSrc(out, mkSrc(v, label, ref, mm[1].toLowerCase() == "mp4" ? "mp4" : "hls"));
         }
-        if (!out.length) log("    voe: sin bloque cifrado (largo html=" + (h || "").length + ")");
+        if (!out.length) {
+            /* si no aparece ninguna de las dos variantes conocidas, intentar
+               un escaneo generico de m3u8/mp4 en la pagina antes de rendirse (Voe
+               cambia el formato del bloque cifrado con cierta frecuencia). */
+            out = scanMedia(h, label, ref, pageUrl);
+            log("    voe: sin bloque cifrado (largo html=" + (h || "").length + ")" + (out.length ? " -> scanMedia genérico encontró " + out.length : ""));
+        }
         return out;
     }
     if (m[2]) {
@@ -805,10 +672,6 @@ function exGeneric(url, label, ref, depth) {
     var h = httpGet(url, ref || (originOf(url) + "/")), out, i, links;
     if (!h) return [];
     out = scanMedia(h, label, url, url);
-    if (webProbeAllowed(url)) {
-        var wp = webProbePage(url, ref || (originOf(url) + "/"), label + " WebProbe", h, 0), wi;
-        for (wi = 0; wi < wp.length; wi++) addSrc(out, wp[wi]);
-    }
     if (out.length) return out;
     out = voeFromHtml(h, url, label);
     if (out.length || depth >= 3) return out;
@@ -851,6 +714,14 @@ function resolveEmbed(url, label, ref, depth) {
     if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
+    if (h.indexOf("vimeus.") >= 0) {
+        /* "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
+           JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
+           Lo dejamos pasar por el generico pero registrando bien el intento para
+           poder afinarlo con datos reales del debug (log de resolveCands). */
+        log("    vimeus: host no-Vimeo real, usando extractor generico");
+        return exGeneric(url, label, ref, depth);
+    }
     return exGeneric(url, label, ref, depth);
 }
 
@@ -963,7 +834,12 @@ function resolveCands(cands, out, prov) {
             got = resolveEmbed(c.url, label, c.ref || (originOf(c.url) + "/"), 0);
         }
         n++;
-        log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length);
+        /* loguear tambien la(s) URL(s) resueltas, no solo la cantidad -
+           asi se puede ver si un proveedor esta devolviendo una fuente valida
+           o solo un match "falso positivo" del escaneo generico. */
+        var urlsFound = [];
+        for (j = 0; j < got.length; j++) urlsFound.push(String(got[j].url || "").substring(0, 140));
+        log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length + (urlsFound.length ? " :: " + urlsFound.join(" | ") : ""));
         var before = out.length;
         for (j = 0; j < got.length; j++) { got[j].name = got[j].name && got[j].name.indexOf(prov) >= 0 ? got[j].name : label; addSrc(out, got[j]); }
         if (out.length > before) good++;
@@ -1004,14 +880,10 @@ function provJuanita(ctx) {
     for (i = 0; i < bodies.length; i++) {
         if (i == verSerieIdx) continue;
         var items = parseJuanita(bodies[i], base);
-        var probed = webProbePage(urls[i], base + "/", "Juanita WebProbe", bodies[i], 0), pi;
-        for (pi = 0; pi < probed.length; pi++) items.push({ url: "", lang: "", srcs: [probed[pi]], prov: "Juanita WebProbe" });
-        if (items.length) { log("  slug OK: " + urls[i] + " (probe=" + probed.length + ")"); return items; }
+        if (items.length) { log("  slug OK: " + urls[i]); return items; }
     }
     if (verSerieIdx >= 0 && bodies[verSerieIdx]) {
         var vs = bodies[verSerieIdx], out = [], links = discoverLinks(vs, urls[verSerieIdx]), j;
-        var vprobe = webProbePage(urls[verSerieIdx], base + "/", "Juanita WebProbe", vs, 0);
-        for (j = 0; j < vprobe.length; j++) out.push({ url: "", lang: "", srcs: [vprobe[j]], prov: "Juanita WebProbe" });
         for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
         var direct = scanMedia(vs, "", base + "/", base + "/"), k;
         for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
@@ -1327,9 +1199,7 @@ function provSite(site, ctx) {
     html = httpGet(pageUrl, f.base + "/");
     if (!html) { log("  pagina vacia"); return []; }
     var c = pageCandidates(html, pageUrl, f.base, site, ctx);
-    var psrc = webProbePage(pageUrl, f.base + "/", site.name + " WebProbe", html, 0), si;
-    for (si = 0; si < psrc.length; si++) c.push({ url: "", lang: "", srcs: [psrc[si]], prov: site.name + " WebProbe" });
-    log("  " + pageUrl.substring(0, 100) + " -> " + c.length + " candidatos (probe=" + psrc.length + ")");
+    log("  " + pageUrl.substring(0, 100) + " -> " + c.length + " candidatos");
     return c;
 }
 
@@ -1602,6 +1472,19 @@ function homePage(page) {
     }
     return { results: mapTmdbList(res.concat(extra)), hasMore: !!(d && d.total_pages && page < Math.min(d.total_pages, 10)) };
 }
+/* traduce ES->EN con MyMemory (gratis, sin key) como plan B cuando la
+   busqueda en espanol no encuentra nada en TMDB (titulos muy recientes/sin
+   traducir todavia, ej. "Spider-Man: Un Nuevo Dia" vs "Brand New Day"). */
+function translateEs2En(q) {
+    if (!q) return "";
+    try {
+        var b = httpGet("https://api.mymemory.translated.net/get?q=" + enc(q) + "&langpair=es|en", "");
+        var r = parseJson(b);
+        var t = r && r.responseData && r.responseData.translatedText ? clean(r.responseData.translatedText) : "";
+        log("translateEs2En('" + q + "') -> '" + t + "'");
+        return t;
+    } catch (e) { log("translateEs2En error " + e); return ""; }
+}
 function searchPage(q, page) {
     var d = tmdbGet("/search/multi?query=" + enc(q) + "&page=" + page + "&include_adult=false");
     return { results: mapTmdbList(d && d.results ? d.results : []), hasMore: !!(d && d.total_pages && page < Math.min(d.total_pages, 10)) };
@@ -1769,6 +1652,16 @@ if (typeof source != "undefined") {
             var r = searchPage(q || "", 1), jk = [];
             try { jk = jkSearch(q || ""); } catch (e2) { jk = []; }
             var first = r.results.concat(jk);
+            /* si la busqueda en espanol no trajo nada de TMDB, reintentar
+               traduciendo la consulta al ingles (titulos muy nuevos que TMDB
+               todavia no tradujo, ej. peliculas anunciadas para 2026). */
+            if (!r.results.length && q) {
+                var tq = translateEs2En(q);
+                if (tq && normalizeTitle(tq) != normalizeTitle(q)) {
+                    var r2 = searchPage(tq, 1);
+                    if (r2.results.length) { first = first.concat(r2.results); r = r2; }
+                }
+            }
             return makePager(first, r.hasMore, function (pg) { return searchPage(q || "", pg); });
         } catch (e) { return new VideoPager([], false, {}); }
     };
