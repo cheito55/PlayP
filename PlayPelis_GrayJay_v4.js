@@ -677,7 +677,9 @@ function discoverLinks(html, pageUrl) {
     return out;
 }
 
-function exVimeus(url, label, ref) {
+function exVimeus(url, label, ref, depth) {
+    depth = depth || 0;
+    if (depth > 3) return [];
     /* "vimeus.com" no es Vimeo real: la pagina se arma con JS del lado del
        cliente, asi que el escaneo generico es lo unico que podemos hacer.
        PRUEBA: los CDN que reparte (vimeos.zip) devuelven "no autorizado" al
@@ -694,7 +696,7 @@ function exVimeus(url, label, ref) {
     out = voeFromHtml(h, url, label);
     if (out.length) return out;
     var links = discoverLinks(h, url), i;
-    for (i = 0; i < links.length && !out.length && budgetLeft(); i++) out = out.concat(resolveEmbed(links[i], label, url, 1));
+    for (i = 0; i < links.length && !out.length && budgetLeft(); i++) out = out.concat(resolveEmbed(links[i], label, url, depth + 1));
     return out;
 }
 function exGeneric(url, label, ref, depth) {
@@ -745,7 +747,7 @@ function resolveEmbed(url, label, ref, depth) {
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
     if (h.indexOf("vimeus.") >= 0) {
         log("    vimeus: host no-Vimeo real, probando referer de origen limpio");
-        return exVimeus(url, label, ref);
+        return exVimeus(url, label, ref, depth);
     }
     return exGeneric(url, label, ref, depth);
 }
