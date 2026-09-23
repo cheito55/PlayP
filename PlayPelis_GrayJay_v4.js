@@ -31,9 +31,7 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
 var MAX_CAND = 8;          /* embeds a resolver por proveedor */
-var WANT_SERVERS = 1;      /* PRUEBA: con 1 se corta apenas el primer proveedor (PelisJuanita) resuelve algo,
-                               en vez de seguir probando Cuevana3/sitios WP solo por variedad de idioma/servidor.
-                               Si PelisJuanita no encuentra nada, sigue de largo con el resto como siempre. */
+var WANT_SERVERS = 3;      /* servidores distintos que resolvieron: con esto se corta la busqueda (salvo "sitios extra") */
 var BUDGET_MS = 50000;     /* tiempo maximo por pelicula/episodio */
 
 var PLPRO_BASE = "https://plpro.org";
@@ -353,7 +351,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "dood.", "doodstream.", "dooood.", "uqload.", "voe.sx", "streamtape.", "upstream.to", "streamlare.", "plusvip.net", "sololatino.net", "zplayer.live", "fastream.to", "vidcloud9.org",
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
-    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus."];
+    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3"];
 var UNSUPPORTED = ["waaw.", "netu.", "hqq.", "younetu.", "hqtv.", "biribup.", "cuevana3.download"];
 
 function hostMatches(h, list) {
@@ -419,13 +417,7 @@ function voeFromHtml(h, pageUrl, label) {
             if (!/^https?:/i.test(v)) { var d = b64decode(v); if (/^https?:/i.test(d)) v = d; }
             addSrc(out, mkSrc(v, label, ref, mm[1].toLowerCase() == "mp4" ? "mp4" : "hls"));
         }
-        if (!out.length) {
-            /* si no aparece ninguna de las dos variantes conocidas, intentar
-               un escaneo generico de m3u8/mp4 en la pagina antes de rendirse (Voe
-               cambia el formato del bloque cifrado con cierta frecuencia). */
-            out = scanMedia(h, label, ref, pageUrl);
-            log("    voe: sin bloque cifrado (largo html=" + (h || "").length + ")" + (out.length ? " -> scanMedia genérico encontró " + out.length : ""));
-        }
+        if (!out.length) log("    voe: sin bloque cifrado (largo html=" + (h || "").length + ")");
         return out;
     }
     if (m[2]) {
@@ -714,14 +706,6 @@ function resolveEmbed(url, label, ref, depth) {
     if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
-    if (h.indexOf("vimeus.") >= 0) {
-        /* "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
-           JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
-           Lo dejamos pasar por el generico pero registrando bien el intento para
-           poder afinarlo con datos reales del debug (log de resolveCands). */
-        log("    vimeus: host no-Vimeo real, usando extractor generico");
-        return exGeneric(url, label, ref, depth);
-    }
     return exGeneric(url, label, ref, depth);
 }
 
@@ -834,12 +818,7 @@ function resolveCands(cands, out, prov) {
             got = resolveEmbed(c.url, label, c.ref || (originOf(c.url) + "/"), 0);
         }
         n++;
-        /* loguear tambien la(s) URL(s) resueltas, no solo la cantidad -
-           asi se puede ver si un proveedor esta devolviendo una fuente valida
-           o solo un match "falso positivo" del escaneo generico. */
-        var urlsFound = [];
-        for (j = 0; j < got.length; j++) urlsFound.push(String(got[j].url || "").substring(0, 140));
-        log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length + (urlsFound.length ? " :: " + urlsFound.join(" | ") : ""));
+        log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length);
         var before = out.length;
         for (j = 0; j < got.length; j++) { got[j].name = got[j].name && got[j].name.indexOf(prov) >= 0 ? got[j].name : label; addSrc(out, got[j]); }
         if (out.length > before) good++;
@@ -1472,19 +1451,6 @@ function homePage(page) {
     }
     return { results: mapTmdbList(res.concat(extra)), hasMore: !!(d && d.total_pages && page < Math.min(d.total_pages, 10)) };
 }
-/* traduce ES->EN con MyMemory (gratis, sin key) como plan B cuando la
-   busqueda en espanol no encuentra nada en TMDB (titulos muy recientes/sin
-   traducir todavia, ej. "Spider-Man: Un Nuevo Dia" vs "Brand New Day"). */
-function translateEs2En(q) {
-    if (!q) return "";
-    try {
-        var b = httpGet("https://api.mymemory.translated.net/get?q=" + enc(q) + "&langpair=es|en", "");
-        var r = parseJson(b);
-        var t = r && r.responseData && r.responseData.translatedText ? clean(r.responseData.translatedText) : "";
-        log("translateEs2En('" + q + "') -> '" + t + "'");
-        return t;
-    } catch (e) { log("translateEs2En error " + e); return ""; }
-}
 function searchPage(q, page) {
     var d = tmdbGet("/search/multi?query=" + enc(q) + "&page=" + page + "&include_adult=false");
     return { results: mapTmdbList(d && d.results ? d.results : []), hasMore: !!(d && d.total_pages && page < Math.min(d.total_pages, 10)) };
@@ -1652,16 +1618,6 @@ if (typeof source != "undefined") {
             var r = searchPage(q || "", 1), jk = [];
             try { jk = jkSearch(q || ""); } catch (e2) { jk = []; }
             var first = r.results.concat(jk);
-            /* si la busqueda en espanol no trajo nada de TMDB, reintentar
-               traduciendo la consulta al ingles (titulos muy nuevos que TMDB
-               todavia no tradujo, ej. peliculas anunciadas para 2026). */
-            if (!r.results.length && q) {
-                var tq = translateEs2En(q);
-                if (tq && normalizeTitle(tq) != normalizeTitle(q)) {
-                    var r2 = searchPage(tq, 1);
-                    if (r2.results.length) { first = first.concat(r2.results); r = r2; }
-                }
-            }
             return makePager(first, r.hasMore, function (pg) { return searchPage(q || "", pg); });
         } catch (e) { return new VideoPager([], false, {}); }
     };
