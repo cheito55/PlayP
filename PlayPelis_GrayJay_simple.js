@@ -31,7 +31,9 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
 var MAX_CAND = 8;          /* embeds a resolver por proveedor */
-var WANT_SERVERS = 3;      /* servidores distintos que resolvieron: con esto se corta la busqueda (salvo "sitios extra") */
+var WANT_SERVERS = 1;      /* PRUEBA: con 1 se corta apenas el primer proveedor (PelisJuanita) resuelve algo,
+                               en vez de seguir probando Cuevana3/sitios WP solo por variedad de idioma/servidor.
+                               Si PelisJuanita no encuentra nada, sigue de largo con el resto como siempre. */
 var BUDGET_MS = 50000;     /* tiempo maximo por pelicula/episodio */
 
 var PLPRO_BASE = "https://plpro.org";
@@ -44,6 +46,7 @@ var _fail = {};        /* host -> {count, at} */
 var _okh = {};
 var FAIL_EXPIRE_MS = 20000;   /* un host "caido" se vuelve a probar solo despues de este tiempo sin fallar */
 var _deadline = 0;
+var _pre = {};          /* cache de paginas pre-descargadas en paralelo (ver prefetchUrls) */
 
 function log(s) { _debug += String(s) + "\n"; }
 function resetDebug() { _debug = ""; }
@@ -105,6 +108,29 @@ function stripAccents(s) {
 }
 function normalizeTitle(s) {
     return stripAccents(clean(s)).toLowerCase().replace(/&[^;\s]+;/g, " ").replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+/* tokens de un titulo normalizado, filtrando "ruido" (calidad/idioma/formato) que
+   aparece pegado a titulos sacados de <title>/alt de paginas de resultados y que
+   antes podia bajar el score de coincidencias validas */
+var TITLE_NOISE = { "1080p": 1, "720p": 1, "480p": 1, "2160p": 1, "4k": 1, "uhd": 1, "hd": 1, "hdtv": 1,
+    "latino": 1, "latam": 1, "castellano": 1, "espanol": 1, "doblado": 1, "doblaje": 1, "subtitulado": 1,
+    "sub": 1, "subs": 1, "vose": 1, "vos": 1, "dual": 1, "audio": 1, "webdl": 1, "webrip": 1, "bluray": 1, "brrip": 1,
+    "online": 1, "gratis": 1, "completa": 1, "pelicula": 1, "peliculas": 1, "serie": 1, "series": 1, "capitulo": 1, "temporada": 1 };
+function titleTokens(s) {
+    var n = normalizeTitle(s), parts = n ? n.split(" ") : [], out = [], i;
+    for (i = 0; i < parts.length; i++) if (parts[i].length > 1 && !TITLE_NOISE[parts[i]]) out.push(parts[i]);
+    return out;
+}
+/* similitud 0-100 por solapamiento de tokens (independiente del orden de las
+   palabras y tolerante a titulos "distintos mas alla del idioma", ej.
+   "Un Nuevo Dia" vs "Brand New Day" no van a matchear por texto -eso lo resuelve
+   alimentar varias variantes de titulo desde TMDB, ver tmdbTitleVariants- pero
+   "Spider Man Un Nuevo Dia" vs "Spider-Man: Un Nuevo Día (2026)" si matchea 100). */
+function tokenSimilarity(a, b) {
+    var ta = titleTokens(a), tb = titleTokens(b), i, hit = 0, used = {};
+    if (!ta.length || !tb.length) return 0;
+    for (i = 0; i < ta.length; i++) { if (!used[ta[i]] && tb.indexOf(ta[i]) >= 0) { hit++; used[ta[i]] = 1; } }
+    return Math.round((hit / Math.max(ta.length, tb.length)) * 100);
 }
 function slugJuanita(t) {
     return stripAccents(t).trim().replace(/[^a-zA-Z0-9]/g, " ").replace(/\s+/g, "-").replace(/-+/g, "-").toLowerCase();
@@ -175,9 +201,38 @@ function hostDead(h) {
     return e.count >= 2 && !_okh[h];
 }
 
+/* descarga varias URLs en paralelo (http.batch) y las deja en cache (_pre) para
+   que la primera llamada a httpGet() sobre cada una de ellas sea instantanea.
+   Es "fire and forget": si una URL nunca se pide via httpGet, simplemente se
+   descarta sin costo funcional -> es seguro llamarla especulativamente para
+   adelantar trabajo que de otro modo se haria en serie. */
+function prefetchUrls(urls, referer) {
+    urls = uniq(urls || []);
+    if (!urls.length || !budgetLeft()) return;
+    var todo = [], i;
+    for (i = 0; i < urls.length; i++) { var u = urls[i]; if (u && !_pre.hasOwnProperty(u) && !hostDead(hostOf(u))) todo.push(u); }
+    if (!todo.length) return;
+    try {
+        if (typeof http.batch == "function") {
+            var b = http.batch(), j;
+            for (j = 0; j < todo.length; j++) b = b.GET(todo[j], hdr(referer || (originOf(todo[j]) + "/")), false);
+            var res = b.execute();
+            for (j = 0; j < todo.length; j++) {
+                var body = readBody(res[j]);
+                if (body) { _okh[hostOf(todo[j])] = 1; _pre[todo[j]] = body.length > MAX_HTML ? body.substring(0, MAX_HTML) : body; }
+                else { _pre[todo[j]] = ""; markFail(hostOf(todo[j])); }
+            }
+            return;
+        }
+    } catch (e) { log("prefetch -> " + e); }
+    /* sin http.batch disponible: no hay ganancia posible, se deja que httpGet
+       normal las pida una por una cuando hagan falta (comportamiento anterior). */
+}
+
 function httpGet(url, referer, extra) {
     var h = hostOf(url), r, b;
     if (!h) return "";
+    if (_pre.hasOwnProperty(url)) { b = _pre[url]; delete _pre[url]; if (b) return b; /* si vino vacio, reintentar en vivo por si fue un fallo transitorio del batch */ }
     if (hostDead(h)) { log("SKIP host caido " + h); return ""; }
     if (!budgetLeft()) { log("SIN TIEMPO " + url.substring(0, 80)); return ""; }
     try {
@@ -235,12 +290,31 @@ function parseJson(t) { try { return JSON.parse(t); } catch (e) { return null; }
 /* TMDB                                                                */
 /* ------------------------------------------------------------------ */
 
+function tmdbUrl(path, lang) {
+    return TMDB_API + path + (path.indexOf("?") >= 0 ? "&" : "?") + "api_key=" + enc(TMDB_KEY) + "&language=" + (lang || "es-AR");
+}
 function tmdbGet(path, lang) {
-    var u = TMDB_API + path + (path.indexOf("?") >= 0 ? "&" : "?") + "api_key=" + enc(TMDB_KEY) + "&language=" + (lang || "es-AR");
     try {
-        var r = http.GET(u, { "User-Agent": UA, "Accept": "application/json" }, false), b = readBody(r);
+        var r = http.GET(tmdbUrl(path, lang), { "User-Agent": UA, "Accept": "application/json" }, false), b = readBody(r);
         return b ? JSON.parse(b) : null;
     } catch (e) { log("TMDB " + path + " -> " + e); return null; }
+}
+/* pide varios endpoints de TMDB EN PARALELO (mismo round-trip) en vez de uno
+   por uno; esto es lo que mas tiempo ahorra al abrir una ficha, porque antes
+   se esperaba es-AR, despues en-US, despues alternative_titles, etc. en serie. */
+function tmdbGetBatch(reqs) {
+    var i, out = [];
+    try {
+        if (typeof http.batch == "function" && reqs.length > 1) {
+            var b = http.batch();
+            for (i = 0; i < reqs.length; i++) b = b.GET(tmdbUrl(reqs[i].path, reqs[i].lang), { "User-Agent": UA, "Accept": "application/json" }, false);
+            var res = b.execute();
+            for (i = 0; i < reqs.length; i++) { var body = readBody(res[i]); out.push(body ? parseJson(body) : null); }
+            return out;
+        }
+    } catch (e) { log("TMDB batch -> " + e); out = []; }
+    for (i = 0; i < reqs.length; i++) out.push(tmdbGet(reqs[i].path, reqs[i].lang));
+    return out;
 }
 function img(p, base) { return p ? (base || TMDB_IMG) + p : ""; }
 function yearOf(s) { var m = /^(\d{4})/.exec(String(s || "")); return m ? m[1] : ""; }
@@ -418,6 +492,9 @@ function voeFromHtml(h, pageUrl, label) {
             addSrc(out, mkSrc(v, label, ref, mm[1].toLowerCase() == "mp4" ? "mp4" : "hls"));
         }
         if (!out.length) {
+            /* si no aparece ninguna de las dos variantes conocidas, intentar
+               un escaneo generico de m3u8/mp4 en la pagina antes de rendirse (Voe
+               cambia el formato del bloque cifrado con cierta frecuencia). */
             out = scanMedia(h, label, ref, pageUrl);
             log("    voe: sin bloque cifrado (largo html=" + (h || "").length + ")" + (out.length ? " -> scanMedia genérico encontró " + out.length : ""));
         }
@@ -710,6 +787,10 @@ function resolveEmbed(url, label, ref, depth) {
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
     if (h.indexOf("vimeus.") >= 0) {
+        /* "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
+           JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
+           Lo dejamos pasar por el generico pero registrando bien el intento para
+           poder afinarlo con datos reales del debug (log de resolveCands). */
         log("    vimeus: host no-Vimeo real, usando extractor generico");
         return exGeneric(url, label, ref, depth);
     }
@@ -765,6 +846,14 @@ function findLinks(html, base, kind) {
     for (var i = 0; i < out.length; i++) out[i].titles.push(slugWords(out[i].url));
     return out;
 }
+/* score de un link candidato contra el contexto (ctx.titles = variantes normalizadas
+   del titulo real, alimentadas con TMDB es/en/original + AKAs -ver tmdbTitleVariants-).
+   Combina: (a) coincidencia fuerte por substring/igualdad (como antes) y (b) similitud
+   por solapamiento de tokens (tokenSimilarity) como red de contencion cuando el orden
+   de palabras o algun articulo/conector difiere pero el titulo es "el mismo" en el
+   mismo idioma. Esto último es lo que evita falsos-negativos por "nombrado distinto"
+   dentro de un mismo idioma; el caso de titulos en OTRO idioma (ES vs EN) se resuelve
+   dandole a ctx.titles ambas variantes desde TMDB, no por fuzzy-matching. */
 function scoreLink(c, ctx) {
     var want = ctx.titles, best = 0, i, j;
     for (i = 0; i < c.titles.length; i++) {
@@ -779,6 +868,12 @@ function scoreLink(c, ctx) {
                    un titulo truncado o un enlace de menu se acepte como coincidencia. */
                 var r = Math.min(t.length, w.length) / Math.max(t.length, w.length);
                 s = r >= 0.85 ? 60 + r * 30 : 0;
+            }
+            if (!s) {
+                /* red de contencion por tokens: solo cuenta si el solapamiento es muy
+                   alto (>=80%), para no reabrir la puerta a falsos positivos */
+                var ts = tokenSimilarity(c.titles[i], want[j]);
+                if (ts >= 80) s = 55 + (ts - 80);
             }
             if (s > best) best = s;
         }
@@ -815,6 +910,14 @@ function resolveCands(cands, out, prov) {
         seen[k] = 1; list.push(c);
     }
     list.sort(function (a, b) { return langRank(a.lang) - langRank(b.lang); });
+    /* adelantar en paralelo las paginas de los primeros candidatos (los que de
+       verdad se van a intentar, ver MAX_CAND) en vez de pedirlas una por una a
+       medida que el loop de abajo las necesita: es la optimizacion de velocidad
+       mas directa sobre "resolver un embed" porque la mayoria de los extractores
+       (voe, vidhide, generic, uqload...) arrancan con un unico httpGet(url). */
+    var pre = [], pn = Math.min(list.length, MAX_CAND);
+    for (i = 0; i < pn; i++) { if (list[i].url) pre.push(list[i].url); }
+    prefetchUrls(pre);
     var n = 0, good = 0;
     for (i = 0; i < list.length && n < MAX_CAND && budgetLeft(); i++) {
         c = list[i];
@@ -825,6 +928,9 @@ function resolveCands(cands, out, prov) {
             got = resolveEmbed(c.url, label, c.ref || (originOf(c.url) + "/"), 0);
         }
         n++;
+        /* loguear tambien la(s) URL(s) resueltas, no solo la cantidad -
+           asi se puede ver si un proveedor esta devolviendo una fuente valida
+           o solo un match "falso positivo" del escaneo generico. */
         var urlsFound = [];
         for (j = 0; j < got.length; j++) urlsFound.push(String(got[j].url || "").substring(0, 140));
         log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length + (urlsFound.length ? " :: " + urlsFound.join(" | ") : ""));
@@ -849,6 +955,34 @@ function parseJuanita(html, base) {
         if (!/^https?:|^\/\//i.test(u)) { var d = b64decode(u); if (/^https?:\/\//i.test(d)) u = d; }
         var lang = langOf(a["data-idioma"] || "") || langOf(strip(html.substring(tags[i].end, tags[i].end + 250)));
         out.push(mkCand(absUrl(u, base), lang, base + "/", "Juanita"));
+    }
+    return out;
+}
+/* /movies/search?s=<q> (y /series/search?s=<q>) - buscador propio de PelisJuanita
+   que SI encuentra titulos recientes que el slug adivinado (movieInfo.php?title=)
+   todavia no tiene armado en su lado (ver nota del usuario: "Spider-Man" 2026 no
+   aparecia por slug pero si por este buscador). Se usa SOLO como plan B cuando el
+   slug directo no trajo nada, y el resultado se valida con scoreLink (titulo+año)
+   antes de confiar en el, nunca a ciegas. El formato exacto de la respuesta no esta
+   100% confirmado (Juanita no documenta su API), asi que el parser es tolerante a
+   varios nombres de campo comunes y deja rastro en el debug para poder ajustarlo
+   rapido si hiciera falta. */
+function juanitaSearchCandidates(json, kind) {
+    var arr = null;
+    if (Array.isArray(json)) arr = json;
+    else if (json) arr = json.results || json.data || json.movies || json.series || json.items || null;
+    if (!arr || !arr.length) return [];
+    var out = [], i;
+    for (i = 0; i < arr.length && i < 20; i++) {
+        var x = arr[i];
+        if (!x) continue;
+        var title = x.title || x.name || x.titulo || x.nombre || "";
+        var slug = x.slug || x.url_slug || x.titleSlug || "";
+        var yr = x.year || x.anio || yearOf(x.release_date || x.fecha || "");
+        var tmdbId = x.tmdb_id || x.tmdbId || x.idTmdb || "";
+        if (!slug && title) slug = slugJuanita(title);
+        if (!slug) continue;
+        out.push({ url: "juanita:" + slug, titles: [title, slugWords(slug)], type: kind, year: yr ? String(yr) : "", tmdbId: tmdbId, slug: slug });
     }
     return out;
 }
@@ -878,6 +1012,24 @@ function provJuanita(ctx) {
         if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
     }
     log("  slugs probados: " + slugs.join(", "));
+    /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
+    if (budgetLeft()) {
+        var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
+        var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
+        for (qi = 0; qi < queries.length && budgetLeft(); qi++) {
+            var sj = parseJson(httpGet(base + qEndpoint + enc(queries[qi]), base + "/"));
+            if (!sj) continue;
+            var cands = juanitaSearchCandidates(sj, ctx.kind);
+            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos");
+            var best = pickBest(cands, ctx);
+            if (!best) continue;
+            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + best.slug
+                : base + "/series/serieInfo.php?nombreSerie=" + best.slug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
+            var fh = httpGet(finalUrl, base + "/"), fi = parseJuanita(fh, base);
+            log("  buscador Juanita: match '" + (best.titles[0] || best.slug) + "' -> slug=" + best.slug + " -> " + fi.length + " candidatos");
+            if (fi.length) return fi;
+        }
+    }
     return [];
 }
 
@@ -922,7 +1074,7 @@ function provCuevana(ctx) {
     for (fi = 0; fi < CUEVANA_FAMILIES.length && budgetLeft(); fi++) {
         var fam = CUEVANA_FAMILIES[fi];
         for (bi = 0; bi < fam.bases.length && budgetLeft(); bi++) {
-            var base = fam.bases[bi], slugs = uniq([slugCuevana(ctx.titleEs), slugCuevana(ctx.titleEn)]), urls = [], reached = false;
+            var base = fam.bases[bi], slugs = uniq([slugCuevana(ctx.titleEs), slugCuevana(ctx.titleEn)].concat(cuevanaAltSlugs(ctx))), urls = [], reached = false;
             for (i = 0; i < slugs.length; i++) urls.push(ctx.kind == "movie" ? fam.movie(base, slugs[i]) : fam.episode(base, slugs[i], ctx.season, ctx.episode));
             var bodies = batchGet(urls, base + "/"), html = "", pageUrl = "";
             for (i = 0; i < bodies.length; i++) {
@@ -965,6 +1117,13 @@ function provCuevana(ctx) {
         }
     }
     return [];
+}
+/* variantes extra de slug de Cuevana usando los titulos alternativos de TMDB
+   (AKAs), capadas para no multiplicar demasiado los intentos de red */
+function cuevanaAltSlugs(ctx) {
+    var out = [], i, alts = ctx.altTitles || [];
+    for (i = 0; i < alts.length && i < 2; i++) { var s = slugCuevana(alts[i]); if (s) out.push(s); }
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1033,8 +1192,14 @@ var SITES = [
     { id: "historiadelcine", name: "HistoriaDelCine", bases: ["https://online.historiadelcine.es"], search: ["/?s={q}"], mode: "wp", extra: true }
 ];
 
+/* variantes de consulta para buscar en un sitio: titulo es/en + hasta 2 AKAs de
+   TMDB, asi un titulo "nombrado distinto" en el sitio (doblaje/region) igual
+   aparece en alguna de las busquedas */
+function siteQueries(ctx) {
+    return uniq([ctx.titleEs, ctx.titleEn].concat((ctx.altTitles || []).slice(0, 2))).slice(0, 4);
+}
 function siteFind(site, ctx) {
-    var qs = uniq([ctx.titleEs, ctx.titleEn]).slice(0, 2), bi, qi, pi;
+    var qs = siteQueries(ctx), bi, qi, pi;
     for (bi = 0; bi < site.bases.length && budgetLeft(); bi++) {
         var base = site.bases[bi], reached = false;
         for (qi = 0; qi < qs.length && budgetLeft(); qi++) {
@@ -1230,6 +1395,23 @@ function provPlPro(ctx) {
 /* orquestador                                                         */
 /* ------------------------------------------------------------------ */
 
+/* antes de recorrer los proveedores en serie, se lanza en paralelo la PRIMERA
+   consulta que cada uno va a hacer (la busqueda de PoseidonHD/PelisPlus/PelisHouse
+   con la primer variante de titulo, y las URLs directas de Cuevana3.eu con el
+   primer slug). Como quedan en cache (_pre), cuando el codigo de cada proveedor
+   llegue a pedir esa misma URL con httpGet() la va a tener lista al instante en
+   vez de esperar su turno -> el "cuello de botella" deja de ser la suma de cada
+   request y pasa a ser, aproximadamente, el mas lento de ellos. */
+function prefetchProviders(ctx) {
+    var urls = [], qs = siteQueries(ctx), q0 = qs[0], i;
+    if (q0) {
+        for (i = 0; i < SITES.length && i < 4; i++) { if (SITES[i].extra && !extraSites()) continue; urls.push(SITES[i].bases[0] + SITES[i].search[0].replace("{q}", enc(q0).replace(/%20/g, "+"))); }
+    }
+    var slug1 = slugCuevana(ctx.titleEs), fam = CUEVANA_FAMILIES[0];
+    if (slug1) urls.push(ctx.kind == "movie" ? fam.movie(fam.bases[0], slug1) : fam.episode(fam.bases[0], slug1, ctx.season, ctx.episode));
+    prefetchUrls(urls);
+}
+
 function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
     plan.push({ n: "PelisJuanita", f: provJuanita });
@@ -1240,6 +1422,7 @@ function collectSources(ctx) {
         if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
         return provPlPro(ctx);
     } });
+    try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
         if (servers >= WANT_SERVERS && !extraSites()) { log("Suficientes servidores (" + servers + "), no se buscan mas sitios"); break; }
@@ -1490,13 +1673,42 @@ function errorDetails(url, msg) {
     });
 }
 
+/* junta las variantes de titulo "oficiales" que da TMDB (titulos alternativos /
+   AKAs por pais) para alimentar las busquedas en los sitios y el buscador de
+   PelisJuanita. Esto es lo que realmente saca el "margen de error por idioma o
+   nombrado distinto": en vez de adivinar un slug a partir de UN titulo, se prueban
+   todas las formas en que el catalogo (TMDB) sabe que esa pelicula/serie es
+   conocida en paises de habla hispana. */
+var ALT_TITLE_COUNTRIES = { "ES": 1, "MX": 1, "AR": 1, "CO": 1, "CL": 1, "PE": 1, "VE": 1, "US": 1 };
+function extractAltTitles(altData, baseTitles) {
+    var arr = (altData && (altData.titles || altData.results)) || [], out = [], i, seen = {};
+    for (i = 0; i < baseTitles.length; i++) seen[normalizeTitle(baseTitles[i])] = 1;
+    for (i = 0; i < arr.length && out.length < 4; i++) {
+        var it = arr[i], t = it && (it.title || it.name);
+        if (!t || !ALT_TITLE_COUNTRIES[it.iso_3166_1]) continue;
+        var n = normalizeTitle(t);
+        if (!n || seen[n]) continue;
+        seen[n] = 1; out.push(clean(t));
+    }
+    return out;
+}
+
 function details(url) {
     var p = parseInternal(url);
     if (!p || p.kind == "show") return null;
     resetDebug();
     startBudget();
     var isTv = p.kind == "tv", path = (isTv ? "/tv/" : "/movie/") + p.id;
-    var es = tmdbGet(path, "es-AR"), en = tmdbGet(path, "en-US");
+    /* es-AR + en-US + alternative_titles + external_ids en UNA sola tanda paralela
+       en vez de 2 a 4 pedidos secuenciales -> menos latencia antes de empezar
+       siquiera a buscar en los proveedores */
+    var batch = tmdbGetBatch([
+        { path: path, lang: "es-AR" },
+        { path: path, lang: "en-US" },
+        { path: path + "/alternative_titles", lang: "en-US" },
+        { path: path + "/external_ids", lang: "en-US" }
+    ]);
+    var es = batch[0], en = batch[1], altData = batch[2], extIds = batch[3];
     var base = es || en;
     if (!base) return errorDetails(url, "TMDB no respondi\u00f3");
 
@@ -1504,11 +1716,16 @@ function details(url) {
         kind: p.kind, id: p.id, season: p.season || 1, episode: p.episode || 1,
         titleEs: (es && (es.title || es.name)) || "", titleEn: (en && (en.title || en.name)) || "",
         titleOrig: (base.original_title || base.original_name) || "",
-        year: yearOf(base.release_date || base.first_air_date)
+        year: yearOf(base.release_date || base.first_air_date),
+        imdbId: (extIds && extIds.imdb_id) || ""
     };
-    ctx.titles = uniq([normalizeTitle(ctx.titleEs), normalizeTitle(ctx.titleEn), normalizeTitle(ctx.titleOrig)]);
+    ctx.altTitles = extractAltTitles(altData, [ctx.titleEs, ctx.titleEn, ctx.titleOrig]);
+    ctx.titles = uniq([normalizeTitle(ctx.titleEs), normalizeTitle(ctx.titleEn), normalizeTitle(ctx.titleOrig)].concat(
+        (function () { var o = [], i; for (i = 0; i < ctx.altTitles.length; i++) o.push(normalizeTitle(ctx.altTitles[i])); return o; })()
+    ));
     var poster = img(base.poster_path), title = ctx.titleEs || ctx.titleEn || "Sin t\u00edtulo";
-    log("TMDB: es='" + ctx.titleEs + "' en='" + ctx.titleEn + "' year=" + ctx.year + (isTv ? " S" + ctx.season + "E" + ctx.episode : ""));
+    log("TMDB: es='" + ctx.titleEs + "' en='" + ctx.titleEn + "' year=" + ctx.year + (ctx.imdbId ? " imdb=" + ctx.imdbId : "") + (isTv ? " S" + ctx.season + "E" + ctx.episode : ""));
+    if (ctx.altTitles.length) log("TMDB AKAs usados para busqueda: " + ctx.altTitles.join(" | "));
 
     var epName = "", epOverview = "", epDate = 0, runtime = 0;
     if (isTv) {
@@ -1569,104 +1786,4 @@ function channelOf(url) {
     if (!p || p.kind != "show") return null;
     var d = getShow(p.id);
     if (!d) return null;
-    return new PlatformChannel({
-        id: new PlatformID(PLATFORM, "show_" + p.id, PID),
-        name: d.name || "Serie",
-        thumbnail: img(d.poster_path),
-        banner: img(d.backdrop_path, TMDB_BACK),
-        subscribers: 0,
-        description: (d.overview || "") + "\n\nTemporadas: " + (d.number_of_seasons || "?") + " \u00b7 Episodios: " + (d.number_of_episodes || "?"),
-        url: url,
-        urlAlternatives: [url],
-        links: {}
-    });
-}
-function channelContents(url) {
-    var p = parseInternal(url);
-    if (!p || p.kind != "show") return new VideoPager([], false, {});
-    var d = getShow(p.id), seasons = seasonList(d), name = d ? d.name : "Serie", poster = d ? img(d.poster_path) : "", idx = 0;
-    var first = seasonEpisodes(p.id, name, poster, seasons[0]);
-    return makePager(first, seasons.length > 1, function () {
-        idx++;
-        return { results: seasonEpisodes(p.id, name, poster, seasons[idx]), hasMore: idx + 1 < seasons.length };
-    });
-}
-function recommendations(url) {
-    var p = parseInternal(url), out = [], i, j;
-    if (!p) return [];
-    if (p.kind == "tv") {
-        /* Todos los episodios de la serie (todas las temporadas), para que se pueda
-           saltar a cualquiera desde "Recomendados/Siguientes". El actual va al final
-           de su temporada para no repetirlo primero. */
-        var d = getShow(p.id), name = d ? d.name : "Serie", poster = d ? img(d.poster_path) : "";
-        var seasons = seasonList(d), sn;
-        for (i = 0; i < seasons.length && out.length < 300; i++) {
-            sn = seasons[i];
-            var sd = tmdbGet("/tv/" + p.id + "/season/" + sn, "es-AR");
-            if (!sd || !sd.episodes) continue;
-            for (j = 0; j < sd.episodes.length; j++) {
-                if (sn == p.season && sd.episodes[j].episode_number == p.episode) continue;
-                out.push(episodeVideo(p.id, name, poster, sn, sd.episodes[j]));
-            }
-        }
-        return out;
-    }
-    if (p.kind == "movie") {
-        var r = tmdbGet("/movie/" + p.id + "/recommendations?page=1");
-        return mapTmdbList(withKind(r && r.results, "movie")).slice(0, 20);
-    }
-    return [];
-}
-
-/* ------------------------------------------------------------------ */
-/* API de GrayJay                                                      */
-/* ------------------------------------------------------------------ */
-
-var FEED_MIXED = (typeof Type !== "undefined" && Type && Type.Feed && Type.Feed.Mixed) ? Type.Feed.Mixed : "MIXED";
-var ORDER_CHRONO = (typeof Type !== "undefined" && Type && Type.Order && Type.Order.Chronological) ? Type.Order.Chronological : "CHRONOLOGICAL";
-
-if (typeof source != "undefined") {
-    source.enable = function (conf, settings, savedState) { _settings = settings || {}; _fail = {}; _okh = {}; };
-    source.setSettings = function (s) { _settings = s || {}; };
-    source.saveState = function () { return ""; };
-    source.getHome = function () {
-        try { var r = homePage(1); return makePager(r.results, r.hasMore, function (pg) { return homePage(pg); }); }
-        catch (e) { return new VideoPager([], false, {}); }
-    };
-    source.searchSuggestions = function (q) { return []; };
-    source.getSearchCapabilities = function () { return { types: [FEED_MIXED], sorts: [], filters: [] }; };
-    source.search = function (q, type, order, filters) {
-        try {
-            var r = searchPage(q || "", 1), jk = [];
-            try { jk = jkSearch(q || ""); } catch (e2) { jk = []; }
-            var first = r.results.concat(jk);
-            if (!r.results.length && q) {
-                var tq = translateEs2En(q);
-                if (tq && normalizeTitle(tq) != normalizeTitle(q)) {
-                    var r2 = searchPage(tq, 1);
-                    if (r2.results.length) { first = first.concat(r2.results); r = r2; }
-                }
-            }
-            return makePager(first, r.hasMore, function (pg) { return searchPage(q || "", pg); });
-        } catch (e) { return new VideoPager([], false, {}); }
-    };
-    source.getSearchChannelContentsCapabilities = function () { return { types: [FEED_MIXED], sorts: [], filters: [] }; };
-    source.searchChannels = function (q) { return new ChannelPager([], false, {}); };
-
-    source.isChannelUrl = function (u) { return /^pelishub:\/\/show\/\d+$/.test(String(u || "")); };
-    source.getChannel = function (u) { return channelOf(u); };
-    source.getChannelCapabilities = function () { return { types: [FEED_MIXED], sorts: [ORDER_CHRONO], filters: [] }; };
-    source.getChannelContents = function (u, type, order, filters) {
-        try { return channelContents(u); } catch (e) { return new VideoPager([], false, {}); }
-    };
-
-    source.isContentDetailsUrl = function (u) { return /^pelishub:\/\/(?:movie\/\d+|tv\/\d+\/\d+\/\d+)$/.test(String(u || "")) || isJkUrl(u); };
-    source.getContentDetails = function (u) {
-        try { return isJkUrl(u) ? jkDetails(u) : details(u); }
-        catch (e) { log("DETAIL " + e); return errorDetails(u, String(e)); }
-    };
-    source.getContentRecommendations = function (u) {
-        try { return new VideoPager(isJkUrl(u) ? jkRecommendations(u) : recommendations(u), false, {}); }
-        catch (e) { return new VideoPager([], false, {}); }
-    };
-}
+    return new Platform
