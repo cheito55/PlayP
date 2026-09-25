@@ -391,7 +391,7 @@ function hardenSrc(c, s, reresolve) {
     markFail(h0);
     if (typeof reresolve == "function" && budgetLeft()) {
         var fresh = reresolve();
-        if (fresh && fresh.length && !looksLikeErrorPage("")) {
+        if (fresh && fresh.length) {
             var freshHost = hostOf(fresh[0].url);
             var f2 = probeMedia(fresh[0].url, (fresh[0].requestModifier && fresh[0].requestModifier.headers && fresh[0].requestModifier.headers["Referer"]) || c.ref);
             if (f2.ok) { _mediaOk[freshHost] = Date.now(); log("    verificar: re-resolucion dio un nodo/token sano"); return fresh[0]; }
@@ -544,7 +544,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "dood.", "doodstream.", "dooood.", "uqload.", "voe.sx", "streamtape.", "upstream.to", "streamlare.", "plusvip.net", "sololatino.net", "zplayer.live", "fastream.to", "vidcloud9.org",
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
-    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream."];
+    "vimeos", "vidhide", "callistanise", "hgcloud.", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream."];
 /* 1fichier.com es un portal de descarga directa (cyberlocker) con captcha/espera,
    no un embed de video con m3u8/mp4 -> no vale la pena gastar tiempo/requests en
    intentarlo, se descarta antes de llegar al extractor generico. */
@@ -896,8 +896,8 @@ function resolveEmbed(url, label, ref, depth) {
     }
     d = mkSrc(url, label, ref);
     if (d) return [d];
-    if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
-    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0) return exVidhide(url, label, ref);
+        if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
+    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0) return exVidhide(url, label, ref);
     if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
     if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
     if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
