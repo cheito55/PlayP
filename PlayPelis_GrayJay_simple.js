@@ -30,7 +30,7 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
-var MAX_CAND = 2;          /* embeds a resolver por proveedor */
+var MAX_CAND = 5;          /* embeds a resolver por proveedor */
 var WANT_SERVERS = 1;      /* PRUEBA: con 1 se corta apenas el primer proveedor (PelisJuanita) resuelve algo,
                                en vez de seguir probando Cuevana3/sitios WP solo por variedad de idioma/servidor.
                                Si PelisJuanita no encuentra nada, sigue de largo con el resto como siempre. */
