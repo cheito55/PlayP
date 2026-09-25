@@ -452,7 +452,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "dood.", "doodstream.", "dooood.", "uqload.", "voe.sx", "streamtape.", "upstream.to", "streamlare.", "plusvip.net", "sololatino.net", "zplayer.live", "fastream.to", "vidcloud9.org",
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
-    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream."];
+    "vimeos", "vidhide", "callistanise", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "hgcloud.", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream."];
 /* 1fichier.com es un portal de descarga directa (cyberlocker) con captcha/espera,
    no un embed de video con m3u8/mp4 -> no vale la pena gastar tiempo/requests en
    intentarlo, se descarta antes de llegar al extractor generico. */
@@ -805,7 +805,7 @@ function resolveEmbed(url, label, ref, depth) {
     d = mkSrc(url, label, ref);
     if (d) return [d];
     if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
-    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0) return exVidhide(url, label, ref);
+    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0) return exVidhide(url, label, ref);
     if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
     if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
     if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
@@ -1083,27 +1083,31 @@ function provJuanita(ctx) {
         if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
     }
     log("  slugs probados: " + slugs.join(", "));
-    /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
+        /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
     if (budgetLeft()) {
         var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
         var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
         for (qi = 0; qi < queries.length && budgetLeft(); qi++) {
-            var sj = parseJson(httpGet(base + qEndpoint + enc(queries[qi]), base + "/"));
-            if (!sj) continue;
-            var cands = juanitaSearchCandidates(sj, ctx.kind);
-            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos");
+            var urlSearch = base + qEndpoint + enc(queries[qi]).replace(/%20/g, "+");
+            var sh = httpGet(urlSearch, base + "/");
+            if (!sh) continue;
+
+            var cands = findLinks(sh, base, ctx.kind);
+            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos HTML");
+            
             var best = pickBest(cands, ctx);
             if (!best) continue;
-            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + best.slug
-                : base + "/series/serieInfo.php?nombreSerie=" + best.slug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
+
+            var bestSlug = String(best.url).split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop();
+
+            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + bestSlug
+                : base + "/series/serieInfo.php?nombreSerie=" + bestSlug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
+            
             var fh = httpGet(finalUrl, base + "/"), fi = parseJuanita(fh, base);
-            log("  buscador Juanita: match '" + (best.titles[0] || best.slug) + "' -> slug=" + best.slug + " -> " + fi.length + " candidatos");
+            log("  buscador Juanita: match '" + (best.titles[0] || bestSlug) + "' -> slug=" + bestSlug + " -> " + fi.length + " candidatos");
             if (fi.length) return fi;
         }
     }
-    return [];
-}
-
 /* ------------------------------------------------------------------ */
 /* Cuevana3 (eu + espejos)                                             */
 /* ------------------------------------------------------------------ */
