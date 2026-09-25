@@ -1041,67 +1041,36 @@ function juanitaSlugCandidates(ctx) {
     return uniq(out).slice(0, 8);
 }
 function provJuanita(ctx) {
-    var base = "https://pelisjuanita.com", slugs = juanitaSlugCandidates(ctx), urls = [], i;
-    for (i = 0; i < slugs.length; i++) {
-        urls.push(ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + slugs[i]
-            : base + "/series/serieInfo.php?nombreSerie=" + slugs[i] + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode);
+    var base = "https://pelisjuanita.com";
+    var slugs = juanitaSlugCandidates(ctx);
+    var slugToUse = slugs.length ? slugs[0] : slugJuanita(ctx.titleEs);
+    if (!slugToUse) return [];
+
+    // URL de tu Web App de Google Apps Script
+    var workerUrl = "https://script.google.com/macros/s/AKfycbwl5G52UH8jFQXjl95YiFYZY1DygYoh9CERzJYX9jI3-siivWuqBYEdlMb8JFif9Nk9/exec";
+    
+    var url = workerUrl + "?type=" + (ctx.kind == "movie" ? "movie" : "tv") + 
+              "&slug=" + enc(slugToUse) + 
+              "&season=" + (ctx.season || 1) + 
+              "&episode=" + (ctx.episode || 1);
+
+    log("  Consultando Google Apps Script para Juanita: " + slugToUse);
+    var resText = httpGet(url, "");
+    var json = parseJson(resText);
+
+    if (!json || !json.success || !json.sources || !json.sources.length) {
+        log("  GAS Juanita: sin fuentes o error en respuesta");
+        return [];
     }
-    /* pagina "ver-serie" (la que da el usuario): puede traer el reproductor con otro
-       marcado, distinto del fragmento AJAX de serieInfo.php */
-    var verSerieIdx = -1;
-    if (ctx.kind == "tv" && slugs.length) { verSerieIdx = urls.length; urls.push(base + "/series/ver-serie/" + slugs[0]); }
-    var bodies = batchGet(urls, base + "/");
-    var hits = [];
-    for (i = 0; i < bodies.length; i++) {
-        if (i == verSerieIdx) continue;
-        var items = parseJuanita(bodies[i], base);
-        if (items.length) hits.push({ slug: slugs[i], items: items });
+
+    var out = [], i, src;
+    for (i = 0; i < json.sources.length; i++) {
+        src = json.sources[i];
+        out.push(mkCand(src.url, src.lang, base + "/", src.prov || "Juanita-GAS"));
     }
-    if (hits.length) {
-        /* de todos los slugs que devolvieron servidores, verificar en paralelo la
-           pagina real (/movies/pelicula/<slug>, confirmada por el usuario) y
-           quedarse con el primero -en orden de prioridad- que confirme titulo/año.
-           Esto es lo que evita el bug de "Pinocho" (distintas versiones sirviendo
-           siempre el mismo contenido porque el slug sin año coincidia con otra
-           pelicula del catalogo del sitio). */
-        var vUrls = [], j;
-        for (j = 0; j < hits.length; j++) vUrls.push(ctx.kind == "movie" ? base + "/movies/pelicula/" + hits[j].slug : base + "/series/ver-serie/" + hits[j].slug);
-        var vBodies = batchGet(vUrls, base + "/");
-        for (j = 0; j < hits.length; j++) {
-            var v = verifyPageTitle(vBodies[j], ctx);
-            if (v.ok === false) { log("  descartado (no coincide t\u00edtulo/a\u00f1o) slug=" + hits[j].slug + (v.pageTitle ? " -> pagina real: '" + v.pageTitle + "'" : "")); continue; }
-            log("  slug OK" + (v.ok === true ? " (verificado: '" + v.pageTitle + "')" : " (no se pudo verificar t\u00edtulo, se usa igual)") + ": " + hits[j].slug);
-            return hits[j].items;
-        }
-        log("  ning\u00fan slug con servidores pas\u00f3 la verificaci\u00f3n de t\u00edtulo/a\u00f1o, se intenta el buscador");
-    }
-    if (verSerieIdx >= 0 && bodies[verSerieIdx]) {
-        var vs = bodies[verSerieIdx], out = [], links = discoverLinks(vs, urls[verSerieIdx]), j;
-        for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
-        var direct = scanMedia(vs, "", base + "/", base + "/"), k;
-        for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
-        if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
-    }
-    log("  slugs probados: " + slugs.join(", "));
-    /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
-    if (budgetLeft()) {
-        var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
-        var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
-        for (qi = 0; qi < queries.length && budgetLeft(); qi++) {
-            var sj = parseJson(httpGet(base + qEndpoint + enc(queries[qi]), base + "/"));
-            if (!sj) continue;
-            var cands = juanitaSearchCandidates(sj, ctx.kind);
-            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos");
-            var best = pickBest(cands, ctx);
-            if (!best) continue;
-            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + best.slug
-                : base + "/series/serieInfo.php?nombreSerie=" + best.slug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
-            var fh = httpGet(finalUrl, base + "/"), fi = parseJuanita(fh, base);
-            log("  buscador Juanita: match '" + (best.titles[0] || best.slug) + "' -> slug=" + best.slug + " -> " + fi.length + " candidatos");
-            if (fi.length) return fi;
-        }
-    }
-    return [];
+
+    log("  GAS Juanita devolvió " + out.length + " candidatos");
+    return out;
 }
 
 /* ------------------------------------------------------------------ */
