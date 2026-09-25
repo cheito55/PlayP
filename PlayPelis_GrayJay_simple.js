@@ -30,7 +30,7 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
-var MAX_CAND = 8;          /* embeds a resolver por proveedor */
+var MAX_CAND = 2;          /* embeds a resolver por proveedor */
 var WANT_SERVERS = 1;      /* PRUEBA: con 1 se corta apenas el primer proveedor (PelisJuanita) resuelve algo,
                                en vez de seguir probando Cuevana3/sitios WP solo por variedad de idioma/servidor.
                                Si PelisJuanita no encuentra nada, sigue de largo con el resto como siempre. */
@@ -1496,9 +1496,9 @@ function prefetchProviders(ctx) {
 function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
     plan.push({ n: "PelisJuanita", f: provJuanita });
-    plan.push({ n: "Cuevana3", f: provCuevana });
     function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
     for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
+    plan.push({ n: "Cuevana3", f: provCuevana });
     plan.push({ n: "PlPro", f: function () {
         if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
         return provPlPro(ctx);
