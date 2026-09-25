@@ -1058,12 +1058,6 @@ function provJuanita(ctx) {
         if (items.length) hits.push({ slug: slugs[i], items: items });
     }
     if (hits.length) {
-        /* de todos los slugs que devolvieron servidores, verificar en paralelo la
-           pagina real (/movies/pelicula/<slug>, confirmada por el usuario) y
-           quedarse con el primero -en orden de prioridad- que confirme titulo/año.
-           Esto es lo que evita el bug de "Pinocho" (distintas versiones sirviendo
-           siempre el mismo contenido porque el slug sin año coincidia con otra
-           pelicula del catalogo del sitio). */
         var vUrls = [], j;
         for (j = 0; j < hits.length; j++) vUrls.push(ctx.kind == "movie" ? base + "/movies/pelicula/" + hits[j].slug : base + "/series/ver-serie/" + hits[j].slug);
         var vBodies = batchGet(vUrls, base + "/");
@@ -1083,7 +1077,8 @@ function provJuanita(ctx) {
         if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
     }
     log("  slugs probados: " + slugs.join(", "));
-        /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
+    
+    /* plan B: buscador propio corrigiendo el parseo a HTML */
     if (budgetLeft()) {
         var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
         var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
@@ -1108,6 +1103,9 @@ function provJuanita(ctx) {
             if (fi.length) return fi;
         }
     }
+    return [];
+}
+
 /* ------------------------------------------------------------------ */
 /* Cuevana3 (eu + espejos)                                             */
 /* ------------------------------------------------------------------ */
