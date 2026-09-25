@@ -1464,24 +1464,26 @@ function prefetchProviders(ctx) {
 
 function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
-    plan.push({ n: "PelisJuanita", f: provJuanita });
-    plan.push({ n: "Cuevana3", f: provCuevana });
-    function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
-    for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
-    plan.push({ n: "PlPro", f: function () {
-        if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
-        return provPlPro(ctx);
-    } });
-    try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
+
+    // 1. Solo usamos tu nueva API rápida de Google
+    plan.push({ n: "Juanita (GAS)", f: provJuanita });
+    
+    // 2. Si falla, saltamos directo a PlPro (que también tiene API propia y es rápido)
+    plan.push({ n: "PlPro", f: provPlPro });
+
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
-        if (servers >= WANT_SERVERS && !extraSites()) { log("Suficientes servidores (" + servers + "), no se buscan mas sitios"); break; }
+        
+        // CORTAFUEGOS DE VELOCIDAD: Si encuentra al menos 1 servidor, detiene toda la búsqueda al instante
+        if (servers >= 1) { log("Servidor encontrado, cortando búsqueda extra"); break; } 
+        
         log("> " + plan[i].n);
         try {
             var c = plan[i].f(ctx);
             servers += resolveCands(c, out, plan[i].n);
         } catch (e) { log("  ERROR " + e); }
     }
+
     var idx = [];
     for (i = 0; i < out.length; i++) idx.push({ s: out[i], i: i, r: langRank(String(out[i].name || "").split(" \u00b7 ")[0]) });
     idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
@@ -1489,6 +1491,7 @@ function collectSources(ctx) {
     for (i = 0; i < idx.length; i++) out.push(idx[i].s);
     return out;
 }
+
 
 /* ------------------------------------------------------------------ */
 /* JKAnime (adaptado de PlPro.js) - catalogo propio, fuera de TMDB      */
