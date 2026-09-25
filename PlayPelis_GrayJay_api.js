@@ -1042,34 +1042,40 @@ function juanitaSlugCandidates(ctx) {
 }
 function provJuanita(ctx) {
     var base = "https://pelisjuanita.com";
-    var slugs = juanitaSlugCandidates(ctx);
-    var slugToUse = slugs.length ? slugs[0] : slugJuanita(ctx.titleEs);
-    if (!slugToUse) return [];
+    // Tomamos las 4 variaciones de nombre más probables (inglés, español, con año, sin año)
+    var slugs = juanitaSlugCandidates(ctx).slice(0, 4); 
+    if (!slugs.length) return [];
 
-    // URL de tu Web App de Google Apps Script
     var workerUrl = "https://script.google.com/macros/s/AKfycbwl5G52UH8jFQXjl95YiFYZY1DygYoh9CERzJYX9jI3-siivWuqBYEdlMb8JFif9Nk9/exec";
+    var urls = [];
     
-    var url = workerUrl + "?type=" + (ctx.kind == "movie" ? "movie" : "tv") + 
-              "&slug=" + enc(slugToUse) + 
-              "&season=" + (ctx.season || 1) + 
-              "&episode=" + (ctx.episode || 1);
-
-    log("  Consultando Google Apps Script para Juanita: " + slugToUse);
-    var resText = httpGet(url, "");
-    var json = parseJson(resText);
-
-    if (!json || !json.success || !json.sources || !json.sources.length) {
-        log("  GAS Juanita: sin fuentes o error en respuesta");
-        return [];
+    // Armamos las 4 peticiones a tu API de Google
+    for (var i = 0; i < slugs.length; i++) {
+        urls.push(workerUrl + "?type=" + (ctx.kind == "movie" ? "movie" : "tv") + 
+                  "&slug=" + enc(slugs[i]) + 
+                  "&season=" + (ctx.season || 1) + 
+                  "&episode=" + (ctx.episode || 1));
     }
 
-    var out = [], i, src;
-    for (i = 0; i < json.sources.length; i++) {
-        src = json.sources[i];
-        out.push(mkCand(src.url, src.lang, base + "/", src.prov || "Juanita-GAS"));
+    log("  Consultando GAS Juanita con " + slugs.length + " variantes en paralelo...");
+    
+    // Dispara las 4 consultas a Google AL MISMO TIEMPO
+    var bodies = batchGet(urls, "");
+    var out = [];
+    
+    for (var i = 0; i < bodies.length; i++) {
+        var json = parseJson(bodies[i]);
+        if (json && json.success && json.sources && json.sources.length) {
+            for (var j = 0; j < json.sources.length; j++) {
+                var src = json.sources[j];
+                out.push(mkCand(src.url, src.lang, base + "/", src.prov || "Juanita-GAS"));
+            }
+            log("  ¡Éxito en GAS con el slug: " + slugs[i] + "!");
+            return out; // Apenas uno funciona, devuelve los enlaces y corta la búsqueda
+        }
     }
 
-    log("  GAS Juanita devolvió " + out.length + " candidatos");
+    log("  Ninguna de las 4 variantes funcionó en Juanita-GAS");
     return out;
 }
 
@@ -1465,16 +1471,14 @@ function prefetchProviders(ctx) {
 function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
 
-    // 1. Solo usamos tu nueva API rápida de Google
     plan.push({ n: "Juanita (GAS)", f: provJuanita });
-    
-    // 2. Si falla, saltamos directo a PlPro (que también tiene API propia y es rápido)
+    plan.push({ n: "Cuevana3", f: provCuevana }); // Excelente respaldo rápido
     plan.push({ n: "PlPro", f: provPlPro });
 
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
         
-        // CORTAFUEGOS DE VELOCIDAD: Si encuentra al menos 1 servidor, detiene toda la búsqueda al instante
+        // Corta la búsqueda apenas encuentre al menos 1 servidor funcional
         if (servers >= 1) { log("Servidor encontrado, cortando búsqueda extra"); break; } 
         
         log("> " + plan[i].n);
