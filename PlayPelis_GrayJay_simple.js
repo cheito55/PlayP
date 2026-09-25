@@ -1495,14 +1495,21 @@ function prefetchProviders(ctx) {
 
 function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
-    plan.push({ n: "PelisJuanita", f: provJuanita });
+    
+    // 1. Primero los sitios WordPress estables y rápidos (PoseidonHD, PelisPlus, etc.)
     function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
     for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
-    plan.push({ n: "Cuevana3", f: provCuevana });
+
     plan.push({ n: "PlPro", f: function () {
         if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
         return provPlPro(ctx);
+    
+    // 2. Luego dejamos a PelisJuanita y Cuevana como segunda opción por si acaso
+    plan.push({ n: "PelisJuanita", f: provJuanita });
+    plan.push({ n: "Cuevana3", f: provCuevana });
+
     } });
+
     try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
