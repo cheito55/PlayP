@@ -1102,34 +1102,6 @@ function parseJuanita(html, base) {
     }
     return out;
 }
-/* /movies/search?s=<q> (y /series/search?s=<q>) - buscador propio de PelisJuanita
-   que SI encuentra titulos recientes que el slug adivinado (movieInfo.php?title=)
-   todavia no tiene armado en su lado (ver nota del usuario: "Spider-Man" 2026 no
-   aparecia por slug pero si por este buscador). Se usa SOLO como plan B cuando el
-   slug directo no trajo nada, y el resultado se valida con scoreLink (titulo+año)
-   antes de confiar en el, nunca a ciegas. El formato exacto de la respuesta no esta
-   100% confirmado (Juanita no documenta su API), asi que el parser es tolerante a
-   varios nombres de campo comunes y deja rastro en el debug para poder ajustarlo
-   rapido si hiciera falta. */
-function juanitaSearchCandidates(json, kind) {
-    var arr = null;
-    if (Array.isArray(json)) arr = json;
-    else if (json) arr = json.results || json.data || json.movies || json.series || json.items || null;
-    if (!arr || !arr.length) return [];
-    var out = [], i;
-    for (i = 0; i < arr.length && i < 20; i++) {
-        var x = arr[i];
-        if (!x) continue;
-        var title = x.title || x.name || x.titulo || x.nombre || "";
-        var slug = x.slug || x.url_slug || x.titleSlug || "";
-        var yr = x.year || x.anio || yearOf(x.release_date || x.fecha || "");
-        var tmdbId = x.tmdb_id || x.tmdbId || x.idTmdb || "";
-        if (!slug && title) slug = slugJuanita(title);
-        if (!slug) continue;
-        out.push({ url: "juanita:" + slug, titles: [title, slugWords(slug)], type: kind, year: yr ? String(yr) : "", tmdbId: tmdbId, slug: slug });
-    }
-    return out;
-}
 /* variantes de slug para un titulo dado, con el año pegado PRIMERO (ej. "pinocho-2022"
    antes que "pinocho"). Esto es clave: el sitio comparte el mismo slug base para
    remakes/homonimos (Pinocho 1940/2019/2022, Moana/Moana 2 sin el "2" no aplica
@@ -1189,21 +1161,30 @@ function provJuanita(ctx) {
         if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
     }
     log("  slugs probados: " + slugs.join(", "));
-    /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
+        /* plan B: buscador propio corrigiendo el parseo a HTML */
     if (budgetLeft()) {
         var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
         var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
         for (qi = 0; qi < queries.length && budgetLeft(); qi++) {
-            var sj = parseJson(httpGet(base + qEndpoint + enc(queries[qi]), base + "/"));
-            if (!sj) continue;
-            var cands = juanitaSearchCandidates(sj, ctx.kind);
-            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos");
+            var urlSearch = base + qEndpoint + enc(queries[qi]).replace(/%20/g, "+");
+            var sh = httpGet(urlSearch, base + "/");
+            if (!sh) continue;
+
+            // Se utiliza findLinks para procesar la respuesta HTML real de la página
+            var cands = findLinks(sh, base, ctx.kind);
+            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos HTML");
+            
             var best = pickBest(cands, ctx);
             if (!best) continue;
-            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + best.slug
-                : base + "/series/serieInfo.php?nombreSerie=" + best.slug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
+
+            // Extraer el slug correcto del enlace encontrado (ej: /movies/pelicula/pinocho-2022 -> pinocho-2022)
+            var bestSlug = String(best.url).split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop();
+
+            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + bestSlug
+                : base + "/series/serieInfo.php?nombreSerie=" + bestSlug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
+            
             var fh = httpGet(finalUrl, base + "/"), fi = parseJuanita(fh, base);
-            log("  buscador Juanita: match '" + (best.titles[0] || best.slug) + "' -> slug=" + best.slug + " -> " + fi.length + " candidatos");
+            log("  buscador Juanita: match '" + (best.titles[0] || bestSlug) + "' -> slug=" + bestSlug + " -> " + fi.length + " candidatos");
             if (fi.length) return fi;
         }
     }
