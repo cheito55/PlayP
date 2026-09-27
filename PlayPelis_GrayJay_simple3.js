@@ -499,6 +499,10 @@ function voeDecodeWith(enc, lut) {
     for (i = 0; i < s.length; i++) u += String.fromCharCode(s.charCodeAt(i) - 3);
     return parseJson(b64decode(reverseStr(u)));
 }
+/* ------------------------------------------------------------------ */
+/* Extractores Optimizados (HLS/MP4 + Calidades + Headers Cast)       */
+/* ------------------------------------------------------------------ */
+
 function srcsFromVoeJson(o, label, ref) {
     var out = [], k, v;
     if (!o) return out;
@@ -506,10 +510,136 @@ function srcsFromVoeJson(o, label, ref) {
         if (!o.hasOwnProperty(k)) continue;
         v = o[k];
         if (typeof v != "string" || !/^https?:\/\//i.test(v)) continue;
-        if (/direct_access|mp4/i.test(k) || /\.mp4(?:[?#]|$)/i.test(v)) addSrc(out, mkSrc(v, label + " MP4", ref, "mp4"));
-        else if (/^(?:source|hls|file|url|src)$/i.test(k)) addSrc(out, mkSrc(v, label, ref, "hls"));
+        
+        // Detección automática de calidad según la llave (ej. "1080p") o la URL
+        var q = fastQualityFromText(k + " " + v);
+        var qLabel = q ? label + " " + q + "p" : label;
+        
+        if (/direct_access|mp4/i.test(k) || /\.mp4(?:[?#]|$)/i.test(v)) {
+            addSrc(out, mkFastSrc(v, qLabel, ref, "mp4", q));
+        } else if (/^(?:source|hls|file|url|src)$/i.test(k)) {
+            addSrc(out, mkFastSrc(v, qLabel + " HLS", ref, "hls", q));
+        }
+    }
+    
+    // Ordenar de mayor a menor calidad
+    out.sort(function(a, b) {
+        var qa = fastQualityFromText(a.name) || 0;
+        var qb = fastQualityFromText(b.name) || 0;
+        return qb - qa;
+    });
+    
+    return out;
+}
+
+function voeFromHtml(h, pageUrl, label) {
+    var out = [], m = /json">\s*\[\s*"([^"]+)"\s*\]\s*<\/script>\s*(?:<script[^>]+src="([^"]+)")?/i.exec(h || ""), ref = originOf(pageUrl) + "/", luts = [], i;
+    if (!m) return scanMedia(h, label, ref, pageUrl);
+    if (m[2]) {
+        var js = httpGet(absUrl(m[2], pageUrl), pageUrl), lm = /(\[(?:'\W{2}'[,\]]){1,9})/.exec(js || "");
+        if (lm) { var arr = lm[1].slice(2, -2).split("','"); if (arr.length) luts.push(arr); }
+    }
+    luts.push(VOE_LUT);
+    for (i = 0; i < luts.length; i++) {
+        var o = null;
+        try { o = voeDecodeWith(m[1], luts[i]); } catch (e) {}
+        if (o) {
+            out = srcsFromVoeJson(o, label, ref);
+            if (out.length) return out;
+        }
     }
     return out;
+}
+
+function exVoe(url, label, ref) {
+    var h = httpGet(url, ref), tries = 0, m, cur = url;
+    while (h && tries < 3) {
+        var out = voeFromHtml(h, cur, label);
+        if (out.length) return out;
+        m = /(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i.exec(h);
+        if (!m || /^(?:#|javascript)/i.test(m[1])) break;
+        cur = absUrl(m[1], cur);
+        h = httpGet(cur, url);
+        tries++;
+    }
+    return [];
+}
+
+function exVidhide(url, label, ref) {
+    var u = String(url || "");
+    if (u.indexOf("vidhidefast.com") >= 0) u = u.replace("vidhidefast.com", "callistanise.com");
+    else if (u.indexOf("vidhide.com") >= 0 && u.indexOf("callistanise") < 0) u = u.replace("vidhide.com", "callistanise.com");
+    
+    var base = "https://" + hostOf(u) + "/";
+    var html = httpGet(u, ref || base);
+    if (!html || html.length < 500) return [];
+    
+    var splitIdx = html.lastIndexOf(".split('|')");
+    if (splitIdx < 0) return [];
+    var keyEnd = html.lastIndexOf("'", splitIdx), keyStart = html.lastIndexOf("'", keyEnd - 1) + 1;
+    var keyArr = html.substring(keyStart, keyEnd).split("|");
+    if (keyArr.length < 50) return [];
+    
+    function decode(s) {
+        return s.replace(/[a-z0-9]+/g, function (tok) {
+            var v = parseInt(tok, 36);
+            return (!isNaN(v) && v > 0 && v < keyArr.length && keyArr[v] && keyArr[v].length > 1) ? keyArr[v] : tok;
+        });
+    }
+    
+    var cands = html.match(/["'][a-z0-9]+:\/\/[^"']+["']/gi) || [], out = [], i, best = "";
+    for (i = 0; i < cands.length; i++) {
+        var decStr = cleanUrl(decode(cands[i].substring(1, cands[i].length - 1)));
+        if (decStr.indexOf("master.") >= 0 && decStr.indexOf(".m3u8") >= 0) { best = decStr; break; }
+        if (!best && decStr.indexOf("master.") >= 0 && decStr.indexOf(".txt") >= 0) best = decStr;
+    }
+    
+    if (!best) return [];
+    if (/\.txt(?:[?#]|$)/i.test(best)) {
+        var txt = httpGet(best, base), m = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i.exec(txt || "");
+        best = m ? cleanUrl(m[0]) : "";
+    }
+    
+    // mkFastSrc inyecta automáticamente Origin y Referer usando "base"
+    if (best) addSrc(out, mkFastSrc(best, label + " HLS", base, "hls"));
+    return out;
+}
+
+function exUqload(url, label) {
+    var u = String(url || ""); if (u.indexOf(".html") < 0) u += ".html";
+    var R = "https://uqload.com/";
+    var h = httpGet(u, url), m = /sources\s*:\s*\[([^\]]+)\]/i.exec(h || ""), out = [], parts, i;
+    if (!m) return out;
+    
+    parts = m[1].replace(/\\"/g, "").replace(/"/g, "").split(",");
+    for (i = 0; i < parts.length; i++) {
+        var srcUrl = clean(parts[i]);
+        if (!srcUrl) continue;
+        
+        // Uqload suele incluir resoluciones en los nombres de archivo
+        var q = fastQualityFromText(srcUrl);
+        var qLabel = q ? label + " " + q + "p" : label;
+        
+        addSrc(out, mkFastSrc(srcUrl, qLabel, R, "mp4", q));
+    }
+    
+    out.sort(function(a, b) {
+        var qa = fastQualityFromText(a.name) || 0;
+        var qb = fastQualityFromText(b.name) || 0;
+        return qb - qa;
+    });
+    
+    return out;
+}
+
+function exStreamTape(url, label) {
+    var R = "https://streamtape.com/";
+    var h = httpGet(url, url), m = /robotlink'\)\.innerHTML\s*=\s*'(.+?)'\s*\+\s*\('(.+?)'\)/i.exec(h || "");
+    if (!m) return [];
+    
+    var finalUrl = "https:" + m[1] + m[2].substring(3);
+    var s = mkFastSrc(finalUrl, label, R, "mp4");
+    return s ? [s] : [];
 }
 function voeFromHtml(h, pageUrl, label) {
     var out = [], m = /json">\s*\[\s*"([^"]+)"\s*\]\s*<\/script>\s*(?:<script[^>]+src="([^"]+)")?/i.exec(h || ""), ref = originOf(pageUrl) + "/", luts = [], i;
@@ -653,37 +783,77 @@ var OK_RANK = { "ultra": 7, "quad": 6, "full": 5, "hd": 4, "sd": 3, "low": 2, "l
 var OK_LABEL = { "ultra": "2160p", "quad": "1440p", "full": "1080p", "hd": "720p", "sd": "480p", "low": "360p", "lowest": "240p", "mobile": "144p" };
 function exOkRu(url, label, ref) {
     var id = (String(url).match(/(?:videoembed|video|live)\/(\d+)/) || String(url).match(/[?&](?:id|mid)=(\d+)/) || [])[1];
-    if (!id) { log("    ok.ru: sin id en " + url.substring(0, 80)); return []; }
-    var R = "https://ok.ru/", out = [], h = httpGet("https://ok.ru/videoembed/" + id, R);
+    if (!id) return [];
+
+    var R = "https://ok.ru/";
+    var out = [];
+    
+    // 1. Prioriza videoembed para lectura rápida, con fallback a video normal
+    var h = httpGet("https://ok.ru/videoembed/" + id, R);
     if (!h) h = httpGet("https://ok.ru/video/" + id, R);
     if (!h) return out;
-    var m = /data-options=(?:"([^"]*)"|'([^']*)')/i.exec(h), meta = null, o, fv;
+
+    var meta = null;
+    
+    // 2. Extracción directa desde data-options sin recorrer el DOM entero
+    var m = /data-options\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(h);
     if (m) {
-        o = parseJson(htmlUnescape(m[1] != null ? m[1] : m[2]));
-        fv = o && o.flashvars;
+        var raw = htmlUnescape(m[1] != null ? m[1] : m[2]);
+        var o = parseJson(raw);
+        var fv = o && o.flashvars;
         if (fv) {
             meta = fv.metadata;
             if (typeof meta == "string") meta = parseJson(meta);
-            if (!meta && fv.metadataUrl) {
-                var mu = fv.metadataUrl;
+            
+            // Si la metadata no viene inline, se pide a su URL dedicada
+            if (!meta && (fv.metadataUrl || fv.metadataURL)) {
+                var mu = fv.metadataUrl || fv.metadataURL;
                 meta = parseJson(httpGet(mu, R)) || parseJson(httpPost(mu, "", R));
             }
         }
     }
+
+    // 3. Plan B: Buscar hlsManifestUrl crudo en el HTML si falla data-options
     if (!meta) {
-        /* plan B: buscar las claves directo en el texto */
-        var t = htmlUnescape(h).replace(/\\\\u0026/g, "&").replace(/\\u0026/g, "&").replace(/\\\\\//g, "/").replace(/\\\//g, "/").replace(/\\"/g, '"'), mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(t);
-        if (mm) addSrc(out, mkSrc(mm[1], label + " HLS", R, "hls"));
-        log("    ok.ru: sin metadata (data-options " + (m ? "presente" : "ausente") + ") plan B -> " + out.length);
+        var t = htmlUnescape(h).replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\"/g, '"');
+        var mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(t);
+        if (mm) addSrc(out, mkFastSrc(mm[1], label + " HLS", R, "hls"));
         return out;
     }
+
+    // 4. Extracción HLS directo 
     var hls = meta.hlsManifestUrl || meta.hlsMasterPlaylistUrl || meta.ondemandHls || "";
-    if (hls) addSrc(out, mkSrc(hls, label + " HLS", R, "hls"));
-    var vids = (meta.videos || []).slice(0);
-    vids.sort(function (a, b) { return (OK_RANK[b.name] || 0) - (OK_RANK[a.name] || 0); });
-    var i;
-    for (i = 0; i < vids.length; i++) if (vids[i].url) addSrc(out, mkSrc(vids[i].url, label + " " + (OK_LABEL[vids[i].name] || vids[i].name || "MP4"), R, "mp4"));
-    log("    ok.ru: hls=" + (hls ? "si" : "no") + " mp4=" + vids.length + (meta.error ? " error=" + meta.error : ""));
+    if (hls) {
+        addSrc(out, mkFastSrc(hls, label + " HLS", R, "hls"));
+    }
+
+    // 5. Mapeo estricto de calidades Ok.ru para ordenar MP4
+    var QUALITY_RANK = {
+        "ultra": 2160, "quad": 1440, "full": 1080, "fullhd": 1080,
+        "hd": 720, "hdp": 720, "sd": 480, "sdp": 480,
+        "low": 360, "lq": 360, "lowest": 240, "mobile": 144
+    };
+
+    var vids = Array.isArray(meta.videos) ? meta.videos.slice(0) : [];
+    
+    // Ordenar videos de mayor a menor calidad antes de agregarlos
+    vids.sort(function(a, b) {
+        var qA = QUALITY_RANK[String(a.name || "").toLowerCase()] || 0;
+        var qB = QUALITY_RANK[String(b.name || "").toLowerCase()] || 0;
+        return qB - qA;
+    });
+
+    for (var i = 0; i < vids.length; i++) {
+        if (vids[i] && vids[i].url) {
+            var vName = String(vids[i].name || "").toLowerCase();
+            var q = QUALITY_RANK[vName] || fastQualityFromText(vids[i].url);
+            var qLabel = q ? q + "p" : (vids[i].name || "MP4");
+            
+            // mkFastSrc se encarga automáticamente de inyectar el Referer y Origin basado en "R"
+            addSrc(out, mkFastSrc(vids[i].url, label + " " + qLabel, R, "mp4", q));
+        }
+    }
+
     return out;
 }
 
@@ -876,6 +1046,79 @@ function findLinks(html, base, kind) {
     for (var i = 0; i < out.length; i++) out[i].titles.push(slugWords(out[i].url));
     return out;
 }
+/* ------------------------------------------------------------------ */
+/* Red WordPress / DooPlay (Cascada Nativa)                           */
+/* ------------------------------------------------------------------ */
+
+var DOOPLAY_SITES = [
+    "https://poseidonhd2.co",
+    "https://pelishouse.com",
+    "https://cinetux.nu",
+    "https://pelisxd.com"
+];
+
+function getDooPlaySlugs(ctx) {
+    var baseSlug = normalizeTitle(ctx.titleEs || ctx.titleOrig).replace(/\s+/g, "-");
+    if (!baseSlug) return [];
+    var out = [];
+    if (ctx.kind === "movie") {
+        if (ctx.year) out.push(baseSlug + "-" + ctx.year);
+        out.push(baseSlug);
+    } else {
+        out.push(baseSlug + "-" + ctx.season + "x" + ctx.episode);
+    }
+    return out;
+}
+
+function extractDooPlayAjax(html, base) {
+    var out = [], re = /<li[^>]+data-post=["'](\d+)["'][^>]+data-nume=["'](\d+)["'][^>]+data-type=["']([^"']+)["'][^>]*>/gi, m, tasks = [];
+    while ((m = re.exec(html)) !== null) tasks.push({ post: m[1], nume: m[2], type: m[3] });
+    if (!tasks.length) return out;
+
+    var ajaxUrl = base + "/wp-admin/admin-ajax.php";
+    for (var i = 0; i < tasks.length; i++) {
+        if (!budgetLeft()) break;
+        var body = "action=doo_player_ajax&post=" + tasks[i].post + "&nume=" + tasks[i].nume + "&type=" + tasks[i].type;
+        var hdrs = { "Content-Type": "application/x-www-form-urlencoded", "X-Requested-With": "XMLHttpRequest", "Referer": base + "/" };
+        try {
+            var r = http.POST(ajaxUrl, body, hdrs, false);
+            var json = parseJson(readBody(r));
+            if (json && json.embed_url) {
+                var embed = json.embed_url, srcMatch = /src=["']([^"']+)["']/i.exec(embed);
+                if (srcMatch) embed = srcMatch[1];
+                if (/^https?:\/\//i.test(embed)) out.push(embed);
+            }
+        } catch(e) { log("Error AJAX " + base + ": " + e); }
+    }
+    return out;
+}
+
+function provDooPlayNetwork(ctx) {
+    var finalEmbeds = [], slugs = getDooPlaySlugs(ctx);
+    if (!slugs.length) return [];
+
+    for (var i = 0; i < DOOPLAY_SITES.length; i++) {
+        if (!budgetLeft()) break;
+        var base = DOOPLAY_SITES[i], foundHtml = "";
+        
+        for (var j = 0; j < slugs.length; j++) {
+            var url = ctx.kind === "movie" ? base + "/peliculas/" + slugs[j] + "/" : base + "/episodios/" + slugs[j] + "/";
+            var html = httpGet(url, base + "/");
+            if (html && html.indexOf("admin-ajax.php") > -1 && html.indexOf("data-post=") > -1) {
+                foundHtml = html;
+                break;
+            }
+        }
+
+        if (foundHtml) {
+            var embeds = extractDooPlayAjax(foundHtml, base);
+            for (var k = 0; k < embeds.length; k++) finalEmbeds.push(mkCand(embeds[k], "Latino", base + "/", "DooPlay"));
+            if (finalEmbeds.length > 0) break;
+        }
+    }
+    return finalEmbeds;
+}
+
 /* score de un link candidato contra el contexto (ctx.titles = variantes normalizadas
    del titulo real, alimentadas con TMDB es/en/original + AKAs -ver tmdbTitleVariants-).
    Combina: (a) coincidencia fuerte por substring/igualdad (como antes) y (b) similitud
@@ -970,140 +1213,6 @@ function resolveCands(cands, out, prov) {
     }
     return good;
 }
-
-/* ------------------------------------------------------------------ */
-/* PelisJuanita (por TMDB, sin busqueda)                               */
-/* ------------------------------------------------------------------ */
-
-function parseJuanita(html, base) {
-    /* ANTES se descartaba toda fila con data-tipo distinto de "stream", pero el
-       sitio tambien sirve servidores perfectamente reproducibles (Streamwish, Dood,
-       Goodstream) bajo data-tipo="download" (el modal "DESCARGAS" que se ve en el
-       sitio) -en varios titulos ESE es el unico tipo de fila que existe, y filtrarlo
-       hacia que la busqueda diera "0 fuentes" aunque la web mostrara servidores. Se
-       aceptan ambos tipos; solo se descartan explicitamente los que claramente no
-       son un host de video (torrent/magnet). */
-    var out = [], tags = findTags(html, /row-download/i), i;
-    for (i = 0; i < tags.length; i++) {
-        var a = attrsOf(tags[i].tag);
-        var tipo = (a["data-tipo"] || "").toLowerCase();
-        if (tipo == "torrent" || tipo == "magnet") continue;
-        var u = a["data-url"];
-        if (!u) continue;
-        if (!/^https?:|^\/\//i.test(u)) { var d = b64decode(u); if (/^https?:\/\//i.test(d)) u = d; }
-        var lang = langOf(a["data-idioma"] || "") || langOf(strip(html.substring(tags[i].end, tags[i].end + 250)));
-        out.push(mkCand(absUrl(u, base), lang, base + "/", "Juanita"));
-    }
-    return out;
-}
-/* /movies/search?s=<q> (y /series/search?s=<q>) - buscador propio de PelisJuanita
-   que SI encuentra titulos recientes que el slug adivinado (movieInfo.php?title=)
-   todavia no tiene armado en su lado (ver nota del usuario: "Spider-Man" 2026 no
-   aparecia por slug pero si por este buscador). Se usa SOLO como plan B cuando el
-   slug directo no trajo nada, y el resultado se valida con scoreLink (titulo+año)
-   antes de confiar en el, nunca a ciegas. El formato exacto de la respuesta no esta
-   100% confirmado (Juanita no documenta su API), asi que el parser es tolerante a
-   varios nombres de campo comunes y deja rastro en el debug para poder ajustarlo
-   rapido si hiciera falta. */
-function juanitaSearchCandidates(json, kind) {
-    var arr = null;
-    if (Array.isArray(json)) arr = json;
-    else if (json) arr = json.results || json.data || json.movies || json.series || json.items || null;
-    if (!arr || !arr.length) return [];
-    var out = [], i;
-    for (i = 0; i < arr.length && i < 20; i++) {
-        var x = arr[i];
-        if (!x) continue;
-        var title = x.title || x.name || x.titulo || x.nombre || "";
-        var slug = x.slug || x.url_slug || x.titleSlug || "";
-        var yr = x.year || x.anio || yearOf(x.release_date || x.fecha || "");
-        var tmdbId = x.tmdb_id || x.tmdbId || x.idTmdb || "";
-        if (!slug && title) slug = slugJuanita(title);
-        if (!slug) continue;
-        out.push({ url: "juanita:" + slug, titles: [title, slugWords(slug)], type: kind, year: yr ? String(yr) : "", tmdbId: tmdbId, slug: slug });
-    }
-    return out;
-}
-/* variantes de slug para un titulo dado, con el año pegado PRIMERO (ej. "pinocho-2022"
-   antes que "pinocho"). Esto es clave: el sitio comparte el mismo slug base para
-   remakes/homonimos (Pinocho 1940/2019/2022, Moana/Moana 2 sin el "2" no aplica
-   pero si el caso de peliculas con el mismo nombre en distinto año), y sin esta
-   variante el codigo siempre terminaba pidiendo el slug corto -que en el sitio
-   corresponde a UNA sola pelicula fija- sin importar cual version se habia pedido. */
-function juanitaSlugCandidates(ctx) {
-    var raw = uniq([ctx.titleEn, ctx.titleEs, ctx.titleOrig].concat(ctx.altTitles || [])), out = [], i, s;
-    for (i = 0; i < raw.length; i++) {
-        s = trimDash(slugJuanita(raw[i]));
-        if (!s) continue;
-        if (ctx.year) out.push(s + "-" + ctx.year);
-        out.push(s);
-    }
-    return uniq(out).slice(0, 8);
-}
-function provJuanita(ctx) {
-    var base = "https://pelisjuanita.com", slugs = juanitaSlugCandidates(ctx), urls = [], i;
-    for (i = 0; i < slugs.length; i++) {
-        urls.push(ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + slugs[i]
-            : base + "/series/serieInfo.php?nombreSerie=" + slugs[i] + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode);
-    }
-    /* pagina "ver-serie" (la que da el usuario): puede traer el reproductor con otro
-       marcado, distinto del fragmento AJAX de serieInfo.php */
-    var verSerieIdx = -1;
-    if (ctx.kind == "tv" && slugs.length) { verSerieIdx = urls.length; urls.push(base + "/series/ver-serie/" + slugs[0]); }
-    var bodies = batchGet(urls, base + "/");
-    var hits = [];
-    for (i = 0; i < bodies.length; i++) {
-        if (i == verSerieIdx) continue;
-        var items = parseJuanita(bodies[i], base);
-        if (items.length) hits.push({ slug: slugs[i], items: items });
-    }
-    if (hits.length) {
-        /* de todos los slugs que devolvieron servidores, verificar en paralelo la
-           pagina real (/movies/pelicula/<slug>, confirmada por el usuario) y
-           quedarse con el primero -en orden de prioridad- que confirme titulo/año.
-           Esto es lo que evita el bug de "Pinocho" (distintas versiones sirviendo
-           siempre el mismo contenido porque el slug sin año coincidia con otra
-           pelicula del catalogo del sitio). */
-        var vUrls = [], j;
-        for (j = 0; j < hits.length; j++) vUrls.push(ctx.kind == "movie" ? base + "/movies/pelicula/" + hits[j].slug : base + "/series/ver-serie/" + hits[j].slug);
-        var vBodies = batchGet(vUrls, base + "/");
-        for (j = 0; j < hits.length; j++) {
-            var v = verifyPageTitle(vBodies[j], ctx);
-            if (v.ok === false) { log("  descartado (no coincide t\u00edtulo/a\u00f1o) slug=" + hits[j].slug + (v.pageTitle ? " -> pagina real: '" + v.pageTitle + "'" : "")); continue; }
-            log("  slug OK" + (v.ok === true ? " (verificado: '" + v.pageTitle + "')" : " (no se pudo verificar t\u00edtulo, se usa igual)") + ": " + hits[j].slug);
-            return hits[j].items;
-        }
-        log("  ning\u00fan slug con servidores pas\u00f3 la verificaci\u00f3n de t\u00edtulo/a\u00f1o, se intenta el buscador");
-    }
-    if (verSerieIdx >= 0 && bodies[verSerieIdx]) {
-        var vs = bodies[verSerieIdx], out = [], links = discoverLinks(vs, urls[verSerieIdx]), j;
-        for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
-        var direct = scanMedia(vs, "", base + "/", base + "/"), k;
-        for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
-        if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
-    }
-    log("  slugs probados: " + slugs.join(", "));
-    /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
-    if (budgetLeft()) {
-        var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
-        var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
-        for (qi = 0; qi < queries.length && budgetLeft(); qi++) {
-            var sj = parseJson(httpGet(base + qEndpoint + enc(queries[qi]), base + "/"));
-            if (!sj) continue;
-            var cands = juanitaSearchCandidates(sj, ctx.kind);
-            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos");
-            var best = pickBest(cands, ctx);
-            if (!best) continue;
-            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + best.slug
-                : base + "/series/serieInfo.php?nombreSerie=" + best.slug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
-            var fh = httpGet(finalUrl, base + "/"), fi = parseJuanita(fh, base);
-            log("  buscador Juanita: match '" + (best.titles[0] || best.slug) + "' -> slug=" + best.slug + " -> " + fi.length + " candidatos");
-            if (fi.length) return fi;
-        }
-    }
-    return [];
-}
-
 /* ------------------------------------------------------------------ */
 /* Cuevana3 (eu + espejos)                                             */
 /* ------------------------------------------------------------------ */
@@ -1495,33 +1604,26 @@ function prefetchProviders(ctx) {
 
 function collectSources(ctx) {
     var out = [], plan = [], i, servers = 0;
-    
-    // 1. Primero los sitios WordPress estables y rápidos (PoseidonHD, PelisPlus, etc.)
-    function mk(site) { return { n: site.name, f: function () { return provSite(site, ctx); } }; }
-    for (i = 0; i < SITES.length; i++) { if (!SITES[i].extra || extraSites()) plan.push(mk(SITES[i])); }
 
-    plan.push({ n: "PlPro", f: function () {
-        if (out.length) { log("  (se omite: el scraping ya encontr\u00f3 fuentes)"); return []; }
-        return provPlPro(ctx);
-    
-    // 2. Luego dejamos a PelisJuanita y Cuevana como segunda opción por si acaso
-    plan.push({ n: "PelisJuanita", f: provJuanita });
+    plan.push({ n: "Red DooPlay", f: provDooPlayNetwork });
     plan.push({ n: "Cuevana3", f: provCuevana });
 
-    } });
-
-    try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
     for (i = 0; i < plan.length; i++) {
-        if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
-        if (servers >= WANT_SERVERS && !extraSites()) { log("Suficientes servidores (" + servers + "), no se buscan mas sitios"); break; }
+        if (!budgetLeft()) break;
+        if (out.length > 0 && FAST_STOP_ON_SOURCE) break;
+
         log("> " + plan[i].n);
         try {
             var c = plan[i].f(ctx);
-            servers += resolveCands(c, out, plan[i].n);
+            if (c && c.length) {
+                var before = out.length;
+                servers += resolveCands(c, out, plan[i].n);
+            }
         } catch (e) { log("  ERROR " + e); }
     }
+
     var idx = [];
-    for (i = 0; i < out.length; i++) idx.push({ s: out[i], i: i, r: langRank(String(out[i].name || "").split(" \u00b7 ")[0]) });
+    for (i = 0; i < out.length; i++) idx.push({ s: out[i], i: i, r: langRank(String(out[i].name || "").split(" · ")[0]) });
     idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
     out = [];
     for (i = 0; i < idx.length; i++) out.push(idx[i].s);
