@@ -1058,8 +1058,10 @@ var DOOPLAY_SITES = [
 ];
 
 function getDooPlaySlugs(ctx) {
+    // Limpia el título para adivinar el slug
     var baseSlug = normalizeTitle(ctx.titleEs || ctx.titleOrig).replace(/\s+/g, "-");
     if (!baseSlug) return [];
+    
     var out = [];
     if (ctx.kind === "movie") {
         if (ctx.year) out.push(baseSlug + "-" + ctx.year);
@@ -1099,23 +1101,70 @@ function provDooPlayNetwork(ctx) {
 
     for (var i = 0; i < DOOPLAY_SITES.length; i++) {
         if (!budgetLeft()) break;
-        var base = DOOPLAY_SITES[i], foundHtml = "";
         
-        for (var j = 0; j < slugs.length; j++) {
-            var url = ctx.kind === "movie" ? base + "/peliculas/" + slugs[j] + "/" : base + "/episodios/" + slugs[j] + "/";
-            var html = httpGet(url, base + "/");
-            if (html && html.indexOf("admin-ajax.php") > -1 && html.indexOf("data-post=") > -1) {
-                foundHtml = html;
-                break;
+        var base = DOOPLAY_SITES[i];
+        log("Intentando DooPlay: " + base);
+        var foundHtml = "", pageUrl = "";
+        
+        // 1. Intento Directo (Probando variantes de URL)
+        var urlBases = ctx.kind === "movie" ? ["/pelicula/", "/peliculas/"] : ["/episodio/", "/episodios/"];
+        
+        for (var j = 0; j < slugs.length && !foundHtml; j++) {
+            for (var b = 0; b < urlBases.length; b++) {
+                var testUrl = base + urlBases[b] + slugs[j] + "/";
+                var html = httpGet(testUrl, base + "/");
+                
+                // Si encontramos el código del reproductor AJAX, la URL es correcta
+                if (html && html.indexOf("admin-ajax.php") > -1 && html.indexOf("data-post=") > -1) {
+                    foundHtml = html;
+                    pageUrl = testUrl;
+                    log("  Éxito directo en: " + testUrl);
+                    break;
+                }
             }
         }
 
+        // 2. Intento por Buscador (Si fallan las URLs adivinadas)
+        if (!foundHtml && budgetLeft()) {
+            log("  Fallo directo, usando buscador interno en " + base);
+            var query = ctx.titleEs || ctx.titleOrig;
+            var searchHtml = httpGet(base + "/?s=" + enc(query), base + "/");
+            
+            if (searchHtml) {
+                // Buscamos enlaces en los resultados de búsqueda que coincidan con peliculas/episodios
+                var re = /<a[^>]+href=["'](https?:\/\/[^"']+(?:\/peliculas?\/|\/episodios?\/)[^"']+)["'][^>]*>/gi;
+                var m, cands = [];
+                while ((m = re.exec(searchHtml)) !== null) {
+                    if (cands.indexOf(m[1]) < 0) cands.push(m[1]);
+                }
+                
+                // Probamos el primer resultado válido
+                if (cands.length > 0) {
+                    var sHtml = httpGet(cands[0], base + "/");
+                    if (sHtml && sHtml.indexOf("admin-ajax.php") > -1) {
+                        foundHtml = sHtml;
+                        pageUrl = cands[0];
+                        log("  Éxito vía buscador: " + pageUrl);
+                    }
+                }
+            }
+        }
+
+        // 3. Extracción de los servidores
         if (foundHtml) {
             var embeds = extractDooPlayAjax(foundHtml, base);
-            for (var k = 0; k < embeds.length; k++) finalEmbeds.push(mkCand(embeds[k], "Latino", base + "/", "DooPlay"));
-            if (finalEmbeds.length > 0) break;
+            for (var k = 0; k < embeds.length; k++) {
+                finalEmbeds.push(mkCand(embeds[k], "Latino", base + "/", "DooPlay"));
+            }
+            
+            // Si encontró enlaces, detenemos la red DooPlay para no buscar en los demás sitios
+            if (finalEmbeds.length > 0) {
+                log("  Extracción exitosa. Deteniendo cascada DooPlay.");
+                break; 
+            }
         }
     }
+    
     return finalEmbeds;
 }
 
