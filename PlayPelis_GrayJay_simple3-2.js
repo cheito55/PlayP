@@ -829,25 +829,33 @@ function encodePlayerUrl(url) {
     return out;
 }
 function exSeriesPlayer(url, label, ref) {
-    var fetchUrl = encodePlayerUrl(url);
-    var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
-    var out = [], i;
-    if (!html) { log("    seriesplayer: sin HTML id=" + String(url).substring(0, 100)); return out; }
-    if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
-    /* Referer del m3u8 = el player (CDN playspelis / 321moviesfree / onfilom lo piden) */
-    out = scanMedia(html, label || "Juanita", fetchUrl, fetchUrl);
-    if (!out.length) {
-        var re = /file\s*:\s*["'](https?:[^"']+)["']/i, m = re.exec(html);
-        if (m && /m3u8|\.mp4/i.test(m[1])) addSrc(out, mkSrc(m[1], label || "Juanita HLS", fetchUrl, "hls"));
-    }
-    /* Forzar HLS + referer del player en todas las fuentes sacadas */
-    for (i = 0; i < out.length; i++) {
-        if (out[i] && out[i].url && !out[i].requestModifier) {
-            var fixed = mkSrc(out[i].url, label || "Juanita HLS", fetchUrl, "hls");
-            if (fixed) out[i] = fixed;
+    var out = [];
+    try {
+        var fetchUrl = encodePlayerUrl(url);
+        log("    seriesplayer GET " + String(fetchUrl).substring(0, 130));
+        var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
+        if (!html) { log("    seriesplayer: sin HTML"); return out; }
+        if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
+        if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) {
+            log("    seriesplayer: Cloudflare challenge");
+            return out;
         }
+        var urls = extractM3u8FromPlayerHtml(html), i, s;
+        for (i = 0; i < urls.length && out.length < 2; i++) {
+            s = mkHlsSafe(urls[i], (label || "Juanita") + " HLS");
+            if (s) addSrc(out, s);
+        }
+        if (!out.length) {
+            var re = /file\s*:\s*["'](https?:[^"']+)["']/i, m = re.exec(html);
+            if (m) {
+                s = mkHlsSafe(m[1], (label || "Juanita") + " HLS");
+                if (s) addSrc(out, s);
+            }
+        }
+        log("    seriesplayer -> " + out.length + (out.length ? " :: " + String(out[0].url).substring(0, 110) : ""));
+    } catch (e) {
+        log("    seriesplayer ERROR: " + e);
     }
-    log("    seriesplayer -> " + out.length + (out.length ? " (" + String(out[0].url || "").substring(0, 90) + "…)" : ""));
     return out;
 }
 
@@ -876,61 +884,95 @@ function exPoseidonPlayer(url, label, ref) {
     return out;
 }
 
+function mkHlsSafe(u, label) {
+    u = cleanUrl(u);
+    if (!u || !/^https?:\/\//i.test(u)) return null;
+    try {
+        return new HLSSource({ name: label || "HLS", url: u, duration: 0 });
+    } catch (e) {
+        log("    mkHlsSafe: " + e);
+        return null;
+    }
+}
+function extractM3u8FromPlayerHtml(html) {
+    var found = [], seen = {}, re, m;
+    if (!html) return found;
+    function add(x) {
+        x = cleanUrl(String(x || ""));
+        if (!x || !/^https?:\/\//i.test(x)) return;
+        if (!/\.m3u8/i.test(x) && !/[?&](?:format|type)=m3u8/i.test(x)) return;
+        if (seen[x]) return;
+        seen[x] = 1;
+        found.push(x);
+    }
+    re = /file\s*:\s*["'](https?:[^"']+)["']/gi;
+    while ((m = re.exec(html)) != null) add(m[1]);
+    re = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi;
+    while ((m = re.exec(html)) != null) add(m[1]);
+    re = /(https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/gi;
+    while ((m = re.exec(html)) != null) add(m[1]);
+    return found;
+}
+
 function resolveEmbed(url, label, ref, depth) {
     depth = depth || 0;
-    url = cleanUrl(url);
-    if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
-    var h = hostOf(url), d;
-    /* Juanita seriesplayer / fortamomar worker → m3u8 directo */
-    if (/fortamomar\.workers\.dev$/i.test(h) || /seriesplayer\./i.test(h) ||
-        /onfilom\.com$/i.test(h) || /playspelis\.com$/i.test(h) || /321moviesfree\.com$/i.test(h)) {
-        if (/\.m3u8/i.test(url) || /\.mp4(?:\?|$)/i.test(url)) {
-            var s0 = mkSrc(url, label || "Juanita HLS", ref || "https://seriesplayer.fortamomar.workers.dev/", "hls");
-            return s0 ? [s0] : [];
+    try {
+        url = cleanUrl(url);
+        if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
+        var h = hostOf(url), d;
+        /* Juanita seriesplayer / fortamomar / CDNs de m3u8 directo */
+        if (/fortamomar\.workers\.dev$/i.test(h) || /seriesplayer\./i.test(h) ||
+            /onfilom\.com$/i.test(h) || /playspelis\.com$/i.test(h) || /321moviesfree\.com$/i.test(h) ||
+            /flixlat\.com$/i.test(h)) {
+            if (/\.m3u8/i.test(url)) {
+                var s0 = mkHlsSafe(url, label || "Juanita HLS");
+                return s0 ? [s0] : [];
+            }
+            if (/\.mp4(?:\?|$)/i.test(url)) {
+                var s1 = mkSrc(url, label || "Juanita MP4", ref, "mp4");
+                return s1 ? [s1] : [];
+            }
+            return exSeriesPlayer(url, label, ref);
         }
-        return exSeriesPlayer(url, label, ref);
-    }
-    if (/player\.poseidonhd2\.co$/i.test(h) || (/poseidonhd2\.co$/i.test(h) && /\/(?:player|download)\.php/i.test(url))) {
-        return exPoseidonPlayer(url, label, ref);
-    }
-    /* cuevana3e.pro reparte sus "cyberlockers" detras de un subdominio propio que
-       redirige via ?v=<base64(url_real)> (a veces ?token=... sin url visible, ese
-       caso sigue de largo y se resuelve como pagina normal mas abajo). Decodificar
-       aca evita un fetch de ida y vuelta a un dominio que no hace nada por si solo. */
-    if (/\.cuevana3e\.pro$/i.test(h)) {
-        var vParam = /[?&]v=([^&]+)/.exec(url);
-        if (vParam) {
-            var real = cleanUrl(b64decode(dec(vParam[1])));
-            if (/^https?:\/\//i.test(real) && real != url) { log("    cuevana3e proxy -> " + real.substring(0, 120)); return resolveEmbed(real, label, ref, depth + 1); }
+        if (/player\.poseidonhd2\.co$/i.test(h) || (/poseidonhd2\.co$/i.test(h) && /\/(?:player|download)\.php/i.test(url))) {
+            return exPoseidonPlayer(url, label, ref);
         }
-    }
-    d = mkSrc(url, label, ref);
-    if (d) return [d];
-    if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
-    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0 ||
-        h.indexOf("filelions") >= 0 || h.indexOf("lulustream") >= 0 || h.indexOf("luluvdo") >= 0) {
-        return exVidhide(url, label, ref);
-    }
-    if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
-    if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
-    if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
-    if (h.indexOf("uqload.") >= 0) return exUqload(url, label);
-    if (h.indexOf("streamtape.") >= 0 || /(?:^|\.)tape\./.test(h)) return exStreamTape(url, label);
-    if (h.indexOf("dood") >= 0 || /d[o]{3,}d/.test(h)) return exDood(url, label);
-    if (h.indexOf("plusvip.") >= 0) return exPlusVip(url, label);
-    if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
-    if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
-    if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
-    /* streamwish / filemoon / mixdrop / supervideo: packer + scanMedia via generico */
-    if (h.indexOf("vimeus.") >= 0) {
-        /* "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
-           JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
-           Lo dejamos pasar por el generico pero registrando bien el intento para
-           poder afinarlo con datos reales del debug (log de resolveCands). */
-        log("    vimeus: host no-Vimeo real, usando extractor generico");
+        if (/\.cuevana3e\.pro$/i.test(h)) {
+            var vParam = /[?&]v=([^&]+)/.exec(url);
+            if (vParam) {
+                var real = cleanUrl(b64decode(dec(vParam[1])));
+                if (/^https?:\/\//i.test(real) && real != url) {
+                    log("    cuevana3e proxy -> " + real.substring(0, 120));
+                    return resolveEmbed(real, label, ref, depth + 1);
+                }
+            }
+        }
+        d = mkSrc(url, label, ref);
+        if (d) return [d];
+        if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
+        if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0 ||
+            h.indexOf("filelions") >= 0 || h.indexOf("lulustream") >= 0 || h.indexOf("luluvdo") >= 0) {
+            return exVidhide(url, label, ref);
+        }
+        if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
+        if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
+        if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
+        if (h.indexOf("uqload.") >= 0) return exUqload(url, label);
+        if (h.indexOf("streamtape.") >= 0 || /(?:^|\.)tape\./.test(h)) return exStreamTape(url, label);
+        if (h.indexOf("dood") >= 0 || /d[o]{3,}d/.test(h)) return exDood(url, label);
+        if (h.indexOf("plusvip.") >= 0) return exPlusVip(url, label);
+        if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
+        if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
+        if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
+        if (h.indexOf("vimeus.") >= 0) {
+            log("    vimeus: host no-Vimeo real, usando extractor generico");
+            return exGeneric(url, label, ref, depth);
+        }
         return exGeneric(url, label, ref, depth);
+    } catch (e) {
+        log("  resolveEmbed ERROR " + String(url).substring(0, 80) + " -> " + e);
+        return [];
     }
-    return exGeneric(url, label, ref, depth);
 }
 
 /* lenguaje a partir de texto libre */
