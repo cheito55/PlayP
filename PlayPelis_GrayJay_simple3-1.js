@@ -29,11 +29,15 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 
 var MAX_ITEMS = 40;
 var MAX_HTML = 1200000;
-var MAX_CAND = 3;
-var WANT_SERVERS = 2;      /* 2 fuentes por título (si una satura, queda la otra) */
-var BUDGET_MS = 35000;
-var CORE_SITE_IDS = { "pelisplus": 1, "cinecalidad": 1 };
-var MAX_WP_PROVIDERS = 2;
+var MAX_CAND = 4;
+var WANT_SERVERS = 3;      /* 3 fuentes por título (si una satura, quedan otras) */
+var BUDGET_MS = 45000;
+/* Top sitios vivos (sep-2026). Poseidon/Juanita/Cuevana van aparte en collectSources. */
+var CORE_SITE_IDS = {
+    "pelisplus": 1, "pelisflix": 1, "pelisxd": 1,
+    "entrepeliculas": 1, "pelisplushd100": 1, "milpelis": 1, "cinecalidad": 1
+};
+var MAX_WP_PROVIDERS = 7;
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -1770,7 +1774,19 @@ function cuevanaAltSlugs(ctx) {
 /* ------------------------------------------------------------------ */
 
 var SITES = [
-    { id: "pelisplus", name: "PelisPlus", bases: ["https://pelisplushd.bz", "https://pelisplushd.nu"], search: ["/search?s={q}", "/search/{q}/1"], mode: "pelisplus" },
+    /* --- Top catálogo (vivos, sep-2026) --- */
+    { id: "pelisplus", name: "PelisPlusHD", bases: [
+        "https://pelisplushd.la",
+        "https://pelisplushd.baby",
+        "https://pelisplus-hd.rest",
+        "https://pelisplushd.bz",
+        "https://milpelis.net"
+      ], search: ["/search?s={q}", "/search/{q}/1", "/inicio/?s={q}"], mode: "pelisplus" },
+    { id: "pelisflix", name: "Pelisflix1", bases: ["https://pelisflix1.tv", "https://pelisflix1.fans"], search: ["/?s={q}"], mode: "wp" },
+    { id: "pelisxd", name: "PelisXD", bases: ["https://www.pelisxd.com"], search: ["/?s={q}"], mode: "wp" },
+    { id: "entrepeliculas", name: "EntrePeliculas", bases: ["https://entrepeliculasyseries.nz"], search: ["/?s={q}"], mode: "wp" },
+    { id: "pelisplushd100", name: "PelisPlus100", bases: ["https://pelisplushd100.lol"], search: ["/search?s={q}", "/?s={q}"], mode: "pelisplus" },
+    { id: "milpelis", name: "MilPelis", bases: ["https://milpelis.net"], search: ["/search?s={q}", "/inicio/?s={q}"], mode: "pelisplus" },
     { id: "cinecalidad", name: "Cinecalidad", bases: ["https://cinecalidad.onl"], search: ["/?s={q}"], mode: "wp" }
 ];
 
@@ -2026,7 +2042,7 @@ function collectSources(ctx) {
      *  2) Juanita
      *  3) Cuevana
      *  4) WP solo si aún no hay fuentes
-     * Early-stop al primer servidor reproducible (WANT_SERVERS).
+     * Early-stop al alcanzar WANT_SERVERS fuentes reproducibles.
      */
     var out = [], plan = [], i, servers = 0, site, wp = 0;
 
