@@ -877,53 +877,61 @@ function exGeneric(url, label, ref, depth) {
     return out;
 }
 
-/* punto de entrada para cualquier URL de embed */
-/* PelisJuanita seriesplayer (Cloudflare Worker + JWPlayer con m3u8 en claro).
- * URL típica:
- *   https://seriesplayer.fortamomar.workers.dev/?id=<hash>-<slug>-Season-N[Audio…]-E
- * El HTML trae jwplayer().setup({ file: "https://…onfilom.com/….m3u8?…" })
- * Los corchetes del id DEBEN ir URL-encoded o curl/http fallan. */
+/* PelisJuanita seriesplayer — SOLO Hija del Mariachi.
+ * Id que anduvo:
+ *   …?id=<hash>-La-hija-del-mariachi-Season-1[AudioC2A0Latino]/2
+ * Pedido HTTP (como la 1ª versión que reproducía):
+ *   encodeURIComponent(id) → %5BAudio…%5D%2F2
+ * El HTML trae jwplayer().setup({ file: "https://….m3u8?hdnts=…" }). */
+function decodePlayerId(id) {
+    try { return decodeURIComponent(String(id || "").replace(/\+/g, "%20")); } catch (e) { return String(id || ""); }
+}
+function isMariachiPlayerUrl(url) {
+    var id = "", m = /[?&]id=([^&]*)/i.exec(String(url || ""));
+    if (m) id = decodePlayerId(m[1]);
+    return /hija-del-mariachi/i.test(id) || /\[[^\]]*Audio[^\]]*\]/i.test(id);
+}
 function encodePlayerUrl(url) {
-    /* Como al inicio del historial: codifica solo el id del query. */
     url = String(url || "").replace(/&amp;/g, "&");
     var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
     if (!m) return url;
     try {
-        var id = decodeURIComponent(m[2]);
-        return m[1] + encodeURIComponent(id).replace(/%20/g, "+");
+        return m[1] + encodeURIComponent(decodePlayerId(m[2])).replace(/%20/g, "+");
     } catch (e) {
         return m[1] + encodeURIComponent(m[2]);
     }
 }
 
+function m3u8FromSeriesPlayerHtml(html) {
+    var m = /file\s*:\s*["'](https?:[^"']+)["']/i.exec(html || "");
+    if (m) return cleanUrl(m[1]);
+    m = /sources?\s*:\s*\[\s*\{\s*file\s*:\s*["'](https?:[^"']+)["']/i.exec(html || "");
+    if (m) return cleanUrl(m[1]);
+    m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html || "");
+    return m ? cleanUrl(m[1]) : "";
+}
 function exSeriesPlayer(url, label, ref) {
-    /*
-     * Version original del historial:
-     *  encodePlayerUrl -> httpGet -> scanMedia -> fallback file:"...m3u8..."
-     */
-    var fetchUrl = encodePlayerUrl(String(url || ""));
-    var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
-    var out = [], m, s, m3u8;
-    if (!html) { log("    seriesplayer: sin HTML"); return out; }
-    if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
-
-    out = scanMedia(html, label || "Juanita", fetchUrl, fetchUrl);
-
-    if (!out.length) {
-        m = /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i.exec(html);
-        if (!m) m = /sources?\s*:\s*\[\s*\{\s*file\s*:\s*["'](https?:[^"']+)["']/i.exec(html);
-        if (!m) m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html);
-        if (m) {
-            m3u8 = cleanUrl(m[1]);
-            s = mkSrc(m3u8, (label || "Juanita") + " HLS", fetchUrl, "hls");
-            if (!s) {
-                try { s = new HLSSource({ name: (label || "Juanita") + " HLS", url: m3u8, duration: 0 }); } catch (e) { s = null; }
-            }
-            if (s) addSrc(out, s);
-        }
+    var out = [], fetchUrl, html, m3u8, s, R;
+    if (!isMariachiPlayerUrl(url)) {
+        log("    seriesplayer: ignorado (no es Hija del Mariachi)");
+        return out;
     }
+    fetchUrl = encodePlayerUrl(String(url || ""));
+    R = ref || "https://pelisjuanita.com/";
+    html = httpGet(fetchUrl, R);
+    if (!html) { log("    seriesplayer Mariachi: sin HTML"); return out; }
+    if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer Mariachi: ID no valido"); return out; }
 
-    log("    seriesplayer -> " + out.length + (out.length ? " (" + String(out[0].url || "").substring(0, 90) + "...)" : " html=" + html.length + "b"));
+    m3u8 = m3u8FromSeriesPlayerHtml(html);
+    if (m3u8) {
+        s = mkSrc(m3u8, (label || "Juanita") + " HLS", fetchUrl, inferMediaType(m3u8) == "mp4" ? "mp4" : "hls");
+        if (!s) {
+            try { s = new HLSSource({ name: (label || "Juanita") + " HLS", url: m3u8, duration: 0 }); } catch (e) { s = null; }
+        }
+        if (s) addSrc(out, s);
+    }
+    if (!out.length) out = scanMedia(html, label || "Juanita", fetchUrl, fetchUrl);
+    log("    seriesplayer Mariachi -> " + out.length + (out.length ? " host=" + hostOf(out[0].url) : " html=" + html.length + "b"));
     return out;
 }
 
@@ -1283,7 +1291,8 @@ function parseJuanita(html, base) {
         var lang = langOf(a["data-idioma"] || "") || langOf(strip(html.substring(tags[i].end, tags[i].end + 250)));
         addU(u, lang);
     }
-    /* seriesplayer: capturar id completo aunque traiga [Audio…] o /episodio */
+    /* seriesplayer: id entero (hash + slug + [Audio…] + /capítulo).
+       No usar [A-Za-z0-9-]+ ni cortar en / : perdería /2 y [Audio…]. */
     re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]*/gi;
     while ((m = re.exec(html || "")) != null) addU(m[0].replace(/&amp;/g, "&"), "Latino");
     re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]*/gi;
