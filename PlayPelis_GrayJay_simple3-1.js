@@ -35,7 +35,7 @@ var BUDGET_MS = 45000;
 /* Top sitios vivos (sep-2026). Poseidon/Juanita/Cuevana van aparte en collectSources. */
 var CORE_SITE_IDS = {
     "pelisplus": 1, "pelisflix": 1, "pelisxd": 1,
-    "entrepeliculas": 1, "pelisplushd100": 1, "milpelis": 1, "cinecalidad": 1
+    "entrepeliculas": 1, "pelisplushd100": 1, "milpelis": 1, "pelispop": 1
 };
 var MAX_WP_PROVIDERS = 7;
 
@@ -1787,7 +1787,7 @@ var SITES = [
     { id: "entrepeliculas", name: "EntrePeliculas", bases: ["https://entrepeliculasyseries.nz"], search: ["/?s={q}"], mode: "wp" },
     { id: "pelisplushd100", name: "PelisPlus100", bases: ["https://pelisplushd100.lol"], search: ["/search?s={q}", "/?s={q}"], mode: "pelisplus" },
     { id: "milpelis", name: "MilPelis", bases: ["https://milpelis.net"], search: ["/search?s={q}", "/inicio/?s={q}"], mode: "pelisplus" },
-    { id: "cinecalidad", name: "Cinecalidad", bases: ["https://cinecalidad.onl"], search: ["/?s={q}"], mode: "wp" }
+    { id: "pelispop", name: "PelisPop", bases: ["https://pelispop.mov"], search: ["/?s={q}"], mode: "wp" }
 ];
 
 /* variantes de consulta para buscar en un sitio: titulo es/en + hasta 2 AKAs de
@@ -1796,7 +1796,69 @@ var SITES = [
 function siteQueries(ctx) {
     return uniq([ctx.titleEs, ctx.titleEn].concat((ctx.altTitles || []).slice(0, 2))).slice(0, 4);
 }
+/* Rutas directas por slug derivado de TMDB (equivalente práctico al indexado
+   por ID de Poseidon: evita la página de búsqueda y va al detalle). */
+function tmdbSlugList(ctx) {
+    var raw = uniq([ctx.titleEs, ctx.titleEn, ctx.titleOrig].concat(ctx.altTitles || [])), out = [], i, s;
+    for (i = 0; i < raw.length; i++) {
+        if (!raw[i]) continue;
+        s = slugCuevana(raw[i]);
+        if (!s) continue;
+        if (ctx.year) out.push(s + "-" + ctx.year);
+        out.push(s);
+        s = trimDash(slugJuanita(raw[i]));
+        if (s) {
+            if (ctx.year) out.push(s + "-" + ctx.year);
+            out.push(s);
+        }
+    }
+    return uniq(out).slice(0, 6);
+}
+function tmdbDirectUrls(site, ctx) {
+    var slugs = tmdbSlugList(ctx), urls = [], bi, si, base, s;
+    for (bi = 0; bi < site.bases.length && urls.length < 12; bi++) {
+        base = site.bases[bi].replace(/\/+$/, "");
+        for (si = 0; si < slugs.length && urls.length < 12; si++) {
+            s = slugs[si];
+            if (site.mode == "pelisplus") {
+                if (ctx.kind == "movie") {
+                    urls.push(base + "/pelicula/" + s);
+                    urls.push(base + "/movies/" + s);
+                } else {
+                    urls.push(base + "/serie/" + s + "/season/" + (ctx.season || 1) + "/episode/" + (ctx.episode || 1));
+                    urls.push(base + "/series/" + s + "/" + (ctx.season || 1) + "/" + (ctx.episode || 1));
+                    urls.push(base + "/serie/" + s);
+                }
+            } else {
+                if (ctx.kind == "movie") {
+                    urls.push(base + "/pelicula/" + s);
+                    urls.push(base + "/peliculas/" + s);
+                    urls.push(base + "/movie/" + s);
+                } else {
+                    urls.push(base + "/serie/" + s);
+                    urls.push(base + "/series/" + s);
+                    urls.push(base + "/episode/" + s + "-temporada-" + (ctx.season || 1) + "-episodio-" + (ctx.episode || 1));
+                }
+            }
+        }
+    }
+    return uniq(urls);
+}
+
 function siteFind(site, ctx) {
+    /* 1) Intento directo por slug TMDB (rápido, preciso) */
+    var direct = tmdbDirectUrls(site, ctx), di, dHtml, dUrl;
+    for (di = 0; di < direct.length && budgetLeft(); di++) {
+        dUrl = direct[di];
+        dHtml = httpGet(dUrl, site.bases[0] + "/");
+        if (!dHtml || dHtml.length < 2000) continue;
+        if (/no (encontr|exist)|not found|404|página no/i.test(dHtml) && dHtml.length < 8000) continue;
+        var v = verifyPageTitle(dHtml, ctx);
+        if (v.ok === false) continue;
+        log("  TMDB-slug OK: " + dUrl.substring(0, 100) + (v.pageTitle ? " ('" + v.pageTitle + "')" : ""));
+        return { html: dHtml, url: dUrl, base: originOf(dUrl) };
+    }
+    /* 2) Búsqueda clásica ?s= */
     var qs = siteQueries(ctx), bi, qi, pi;
     for (bi = 0; bi < site.bases.length && budgetLeft(); bi++) {
         var base = site.bases[bi], reached = false;
@@ -1938,16 +2000,21 @@ function provSite(site, ctx) {
     if (!f) { log("  sin resultado"); return []; }
     pageUrl = f.url;
     if (ctx.kind == "tv") {
-        var ep = "";
-        if (site.mode == "pelisplus" && /\/serie\//i.test(pageUrl)) ep = pageUrl.replace(/\/+$/, "") + "/season/" + ctx.season + "/episode/" + ctx.episode;
-        else {
-            var sh = httpGet(pageUrl, f.base + "/");
-            ep = episodeLink(sh, f.base, ctx.season, ctx.episode);
+        /* Si el slug TMDB ya apuntó al episodio, no rearmar la URL */
+        if (!/\/season\/\d+\/episode\/\d+|\/\d+\/\d+(?:\/|$)|episodio-\d+/i.test(pageUrl)) {
+            var ep = "";
+            if (site.mode == "pelisplus" && /\/serie\//i.test(pageUrl)) {
+                ep = pageUrl.replace(/\/+$/, "") + "/season/" + ctx.season + "/episode/" + ctx.episode;
+            } else {
+                var sh = f.html || httpGet(pageUrl, f.base + "/");
+                ep = episodeLink(sh, f.base, ctx.season, ctx.episode);
+            }
+            if (!ep) { log("  episodio " + ctx.season + "x" + ctx.episode + " no encontrado"); return []; }
+            pageUrl = ep;
+            f.html = null;
         }
-        if (!ep) { log("  episodio " + ctx.season + "x" + ctx.episode + " no encontrado"); return []; }
-        pageUrl = ep;
     }
-    html = httpGet(pageUrl, f.base + "/");
+    html = f.html || httpGet(pageUrl, f.base + "/");
     if (!html) { log("  pagina vacia"); return []; }
     var c = pageCandidates(html, pageUrl, f.base, site, ctx);
     log("  " + pageUrl.substring(0, 100) + " -> " + c.length + " candidatos");
@@ -2001,8 +2068,8 @@ function provPlPro(ctx) {
    vez de esperar su turno -> el "cuello de botella" deja de ser la suma de cada
    request y pasa a ser, aproximadamente, el mas lento de ellos. */
 function prefetchProviders(ctx) {
-    /* Paralelo: Poseidon JSON + Juanita slug + Cuevana slug en 1 batch. */
-    var urls = [], slug1, fam, jslug, bid, id;
+    /* Paralelo: Poseidon JSON + slugs TMDB de sitios top + Cuevana (Juanita al final, suele CF). */
+    var urls = [], slug1, fam, bid, id, i, site, d;
     try {
         if (ctx && ctx.id) {
             bid = poseidonBuildId();
@@ -2017,14 +2084,13 @@ function prefetchProviders(ctx) {
         }
     } catch (e) { log("prefetch poseidon -> " + e); }
 
-    jslug = (ctx && ctx.id && _juanitaSlugIndex[String(ctx.id)]) || slugJuanita(ctx.titleEs || ctx.titleEn || "");
-    if (jslug) {
-        if (ctx.kind == "movie") {
-            urls.push("https://pelisjuanita.com/movies/movieInfo.php?title=" + enc(jslug));
-        } else {
-            urls.push("https://pelisjuanita.com/series/serieInfo.php?nombreSerie=" + enc(jslug) +
-                "&nroTemporada=" + enc(ctx.season || 1) + "&nroEpisodio=" + enc(ctx.episode || 1));
-        }
+    /* primeras URLs directas por slug TMDB de cada sitio core */
+    for (i = 0; i < SITES.length && urls.length < 14; i++) {
+        site = SITES[i];
+        if (!site || !CORE_SITE_IDS[site.id]) continue;
+        d = tmdbDirectUrls(site, ctx);
+        if (d.length) urls.push(d[0]);
+        if (d.length > 1) urls.push(d[1]);
     }
 
     slug1 = slugCuevana(ctx.titleEs || ctx.titleEn || "");
@@ -2046,26 +2112,24 @@ function collectSources(ctx) {
      */
     var out = [], plan = [], i, servers = 0, site, wp = 0;
 
+    /* Prioridad: Poseidon (TMDB JSON) → sitios top con slug TMDB → Cuevana → Juanita (CF, último) */
     plan.push({ n: "PoseidonHD", f: function (c) { return provPoseidon(c); }, fast: 1 });
-    plan.push({ n: "PelisJuanita", f: function (c) { return provJuanita(c); }, fast: 1 });
-    plan.push({ n: "Cuevana3", f: function (c) { return provCuevana(c); }, fast: 0 });
-
-    /* WP solo como plan B — no se agregan al plan hasta fallar los fast */
-    var wpPlan = [];
     for (i = 0; i < SITES.length; i++) {
         site = SITES[i];
         if (!site || site.id == "poseidonhd") continue;
         if (!CORE_SITE_IDS[site.id] && !extraSites()) continue;
         if (!extraSites() && wp >= MAX_WP_PROVIDERS) continue;
         wp++;
-        wpPlan.push({
+        plan.push({
             n: site.name,
             f: (function (s) {
                 return function (c) { return provSite(s, c); };
             })(site),
-            fast: 0
+            fast: 1
         });
     }
+    plan.push({ n: "Cuevana3", f: function (c) { return provCuevana(c); }, fast: 0 });
+    plan.push({ n: "PelisJuanita", f: function (c) { return provJuanita(c); }, fast: 0 });
 
     try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
 
@@ -2086,11 +2150,6 @@ function collectSources(ctx) {
     }
 
     runPlan(plan);
-    /* Solo WP si los 3 principales no dieron nada */
-    if (servers < WANT_SERVERS && budgetLeft() && wpPlan.length) {
-        log("Plan B: sitios WP (" + wpPlan.length + ")");
-        runPlan(wpPlan);
-    }
 
     var idx = [], j;
     for (j = 0; j < out.length; j++) {
