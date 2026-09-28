@@ -815,39 +815,49 @@ function exGeneric(url, label, ref, depth) {
  * El HTML trae jwplayer().setup({ file: "https://…onfilom.com/….m3u8?…" })
  * Los corchetes del id DEBEN ir URL-encoded o curl/http fallan. */
 function encodePlayerUrl(url) {
-    /* Codifica [ ] / en el id para que no se corte la URL */
+    /* Como al inicio del historial: codifica solo el id del query. */
     url = String(url || "").replace(/&amp;/g, "&");
-    var m = /^(https?:\/\/[^?#]+)\?id=(.+)$/i.exec(url);
+    var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
     if (!m) return url;
-    var id;
-    try { id = decodeURIComponent(m[2]); } catch (e) { id = m[2]; }
-    return m[1] + "?id=" + encodeURIComponent(id);
+    try {
+        var id = decodeURIComponent(m[2]);
+        return m[1] + encodeURIComponent(id).replace(/%20/g, "+");
+    } catch (e) {
+        return m[1] + encodeURIComponent(m[2]);
+    }
 }
 
 function exSeriesPlayer(url, label, ref) {
-    /* Versión simple (como al inicio): player HTML → file m3u8 → HLSSource */
-    var out = [];
-    var fetchUrl = encodePlayerUrl(cleanUrl(url));
+    /*
+     * Version original del historial:
+     *  encodePlayerUrl -> httpGet -> scanMedia -> fallback file:"...m3u8..."
+     */
+    var fetchUrl = encodePlayerUrl(String(url || ""));
     var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
+    var out = [], m, s, m3u8;
     if (!html) { log("    seriesplayer: sin HTML"); return out; }
     if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
 
-    var m = /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i.exec(html);
-    if (!m) m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html);
-    if (!m) {
-        log("    seriesplayer: sin m3u8");
-        return out;
+    out = scanMedia(html, label || "Juanita", fetchUrl, fetchUrl);
+
+    if (!out.length) {
+        m = /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i.exec(html);
+        if (!m) m = /sources?\s*:\s*\[\s*\{\s*file\s*:\s*["'](https?:[^"']+)["']/i.exec(html);
+        if (!m) m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html);
+        if (m) {
+            m3u8 = cleanUrl(m[1]);
+            s = mkSrc(m3u8, (label || "Juanita") + " HLS", fetchUrl, "hls");
+            if (!s) {
+                try { s = new HLSSource({ name: (label || "Juanita") + " HLS", url: m3u8, duration: 0 }); } catch (e) { s = null; }
+            }
+            if (s) addSrc(out, s);
+        }
     }
-    var m3u8 = cleanUrl(m[1]);
-    var s = mkSrc(m3u8, (label || "Juanita") + " HLS", fetchUrl, "hls");
-    if (s) {
-        addSrc(out, s);
-        log("    seriesplayer -> 1 :: " + m3u8.substring(0, 100));
-    }
+
+    log("    seriesplayer -> " + out.length + (out.length ? " (" + String(out[0].url || "").substring(0, 90) + "...)" : " html=" + html.length + "b"));
     return out;
 }
 
-/* Poseidon player.php: el HTML trae el cyberlocker real (streamwish, vidhide…) */
 function exPoseidonPlayer(url, label, ref) {
     var html = httpGet(url, ref || "https://www.poseidonhd2.co/"), out = [], links = [], i, j, more, m, re;
     if (!html) return out;
@@ -1207,11 +1217,14 @@ function parseJuanita(html, base) {
         var lang = langOf(a["data-idioma"] || "") || langOf(strip(html.substring(tags[i].end, tags[i].end + 250)));
         addU(u, lang);
     }
-    /* seriesplayer con id que puede traer / o [Audio…] */
-    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>\\]+/gi;
+    /* seriesplayer: capturar id completo aunque traiga [Audio…] o /episodio */
+    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>]*/gi;
     while ((m = re.exec(html || "")) != null) addU(m[0].replace(/&amp;/g, "&"), "Latino");
-    re = /https?:\/\/seriesplayer\.[^\s"'<>\\]+\/\?id=[^\s"'<>\\]+/gi;
+    re = /https?:\/\/seriesplayer\.[a-z0-9._-]+\/\?id=[^\s"'<>]*/gi;
     while ((m = re.exec(html || "")) != null) addU(m[0].replace(/&amp;/g, "&"), "Latino");
+    /* data-url / href con id=…[Audio…]… (por si el HTML no trae dominio completo) */
+    re = /(?:data-url|href|src)=["']([^"']*fortamomar[^"']*|[^"']*seriesplayer[^"']*)["']/gi;
+    while ((m = re.exec(html || "")) != null) addU(m[1].replace(/&amp;/g, "&"), "Latino");
     /* iframes del player */
     tags = findTags(html, /^<iframe\b/i);
     for (i = 0; i < tags.length; i++) {
