@@ -30,8 +30,15 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
 var MAX_CAND = 4;          /* embeds a resolver por proveedor (menos = mas rapido) */
-var WANT_SERVERS = 2;      /* cortar cuando ya hay N fuentes reproducibles (Poseidon suele bastar con 1-2) */
-var BUDGET_MS = 35000;     /* tiempo maximo por pelicula/episodio */
+var WANT_SERVERS = 2;      /* cortar cuando ya hay N fuentes reproducibles */
+var BUDGET_MS = 40000;     /* tiempo maximo por pelicula/episodio */
+/* Sitios WP core (además de Poseidon/Juanita/Cuevana). El resto solo con extraSites=true */
+var CORE_SITE_IDS = {
+    "pelisplus": 1, "pelishouse": 1, "cinetux": 1, "pelispedia": 1,
+    "pelisxd": 1, "allpeliculas": 1, "repelis": 1, "cinecalidad": 1,
+    "pelisplay": 1, "gnula": 1
+};
+var MAX_WP_PROVIDERS = 6;  /* tope de sitios WP por título */
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -449,7 +456,8 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "dood.", "doodstream.", "dooood.", "uqload.", "voe.sx", "streamtape.", "upstream.to", "streamlare.", "plusvip.net", "sololatino.net", "zplayer.live", "fastream.to", "vidcloud9.org",
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
-    "vimeos", "vidhide", "callistanise", "hgcloud.", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream."];
+    "vimeos", "vidhide", "callistanise", "hgcloud.", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream.",
+    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com"];
 /* 1fichier.com es un portal de descarga directa (cyberlocker) con captcha/espera,
    no un embed de video con m3u8/mp4 -> no vale la pena gastar tiempo/requests en
    intentarlo, se descarta antes de llegar al extractor generico. */
@@ -783,6 +791,39 @@ function exGeneric(url, label, ref, depth) {
 }
 
 /* punto de entrada para cualquier URL de embed */
+/* PelisJuanita seriesplayer (Cloudflare Worker + JWPlayer con m3u8 en claro).
+ * URL típica:
+ *   https://seriesplayer.fortamomar.workers.dev/?id=<hash>-<slug>-Season-N[Audio…]-E
+ * El HTML trae jwplayer().setup({ file: "https://…onfilom.com/….m3u8?…" })
+ * Los corchetes del id DEBEN ir URL-encoded o curl/http fallan. */
+function encodePlayerUrl(url) {
+    url = String(url || "");
+    /* solo codifica el query id si trae [ ] u otros chars problemáticos */
+    var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
+    if (!m) return url;
+    try {
+        var id = decodeURIComponent(m[2]);
+        return m[1] + encodeURIComponent(id).replace(/%20/g, "+");
+    } catch (e) {
+        return m[1] + encodeURIComponent(m[2]);
+    }
+}
+function exSeriesPlayer(url, label, ref) {
+    var fetchUrl = encodePlayerUrl(url);
+    var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
+    var out = [];
+    if (!html) { log("    seriesplayer: sin HTML"); return out; }
+    if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
+    out = scanMedia(html, label || "Juanita", fetchUrl, fetchUrl);
+    if (!out.length) {
+        /* file: "…m3u8…" por si el regex general falla con query larga */
+        var re = /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i, m = re.exec(html);
+        if (m) addSrc(out, mkSrc(m[1], label || "Juanita HLS", fetchUrl, "hls"));
+    }
+    log("    seriesplayer -> " + out.length + (out.length ? " (" + String(out[0].url || "").substring(0, 80) + "…)" : ""));
+    return out;
+}
+
 /* Poseidon player.php: el HTML trae el cyberlocker real (streamwish, vidhide…) */
 function exPoseidonPlayer(url, label, ref) {
     var html = httpGet(url, ref || "https://www.poseidonhd2.co/"), out = [], links = [], i, j, more, m, re;
@@ -813,6 +854,14 @@ function resolveEmbed(url, label, ref, depth) {
     url = cleanUrl(url);
     if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
     var h = hostOf(url), d;
+    /* Juanita seriesplayer / fortamomar worker → m3u8 directo */
+    if (/fortamomar\.workers\.dev$/i.test(h) || /seriesplayer\./i.test(h) || /onfilom\.com$/i.test(h)) {
+        if (/\.m3u8/i.test(url)) {
+            var s0 = mkSrc(url, label || "Juanita HLS", ref, "hls");
+            return s0 ? [s0] : [];
+        }
+        return exSeriesPlayer(url, label, ref);
+    }
     if (/player\.poseidonhd2\.co$/i.test(h) || (/poseidonhd2\.co$/i.test(h) && /\/(?:player|download)\.php/i.test(url))) {
         return exPoseidonPlayer(url, label, ref);
     }
@@ -1873,43 +1922,75 @@ function provPlPro(ctx) {
    vez de esperar su turno -> el "cuello de botella" deja de ser la suma de cada
    request y pasa a ser, aproximadamente, el mas lento de ellos. */
 function prefetchProviders(ctx) {
-    /* Solo adelantar lo que realmente vamos a usar (3 proveedores). */
+    /* Adelantar primeras URLs de proveedores principales + 2-3 WP core. */
     var urls = [], slug1 = slugCuevana(ctx.titleEs || ctx.titleEn || ""), fam = CUEVANA_FAMILIES[0];
     if (slug1) {
         urls.push(ctx.kind == "movie" ? fam.movie(fam.bases[0], slug1) : fam.episode(fam.bases[0], slug1, ctx.season, ctx.episode));
     }
-    /* Juanita: primera URL de slug directo */
     var jslug = slugJuanita(ctx.titleEs || ctx.titleEn || "");
     if (jslug) {
-        if (ctx.kind == "movie") urls.push("https://pelisjuanita.com/movieInfo.php?title=" + enc(jslug));
-        else urls.push("https://pelisjuanita.com/serieInfo.php?nombreSerie=" + enc(jslug) + "&nroTemporada=" + enc(ctx.season) + "&nroEpisodio=" + enc(ctx.episode));
+        if (ctx.kind == "movie") {
+            urls.push("https://pelisjuanita.com/movies/movieInfo.php?title=" + enc(jslug));
+        } else {
+            urls.push("https://pelisjuanita.com/series/serieInfo.php?nombreSerie=" + enc(jslug) +
+                "&nroTemporada=" + enc(ctx.season) + "&nroEpisodio=" + enc(ctx.episode));
+        }
+    }
+    var q0 = (ctx.titleEs || ctx.titleEn || ""), i, n = 0;
+    if (q0) {
+        for (i = 0; i < SITES.length && n < 4; i++) {
+            if (SITES[i].id == "poseidonhd") continue;
+            if (!CORE_SITE_IDS[SITES[i].id]) continue;
+            urls.push(SITES[i].bases[0] + SITES[i].search[0].replace("{q}", enc(q0).replace(/%20/g, "+")));
+            n++;
+        }
     }
     prefetchUrls(urls);
 }
 
 function collectSources(ctx) {
-    /* Solo 3 proveedores, en orden de velocidad esperada:
-       1) PoseidonHD JSON por TMDB ID
-       2) PelisJuanita
-       3) Cuevana3
-       Early-stop al alcanzar WANT_SERVERS fuentes reproducibles. */
+    /*
+     * Orden:
+     *  1) PoseidonHD (JSON por TMDB ID — más rápido)
+     *  2) PelisJuanita
+     *  3) Cuevana3
+     *  4) Sitios WP core (pelisplus, cinetux, …) — cobertura extra
+     *  5) Resto de SITES solo si settings.extraSites = true
+     *
+     * Early-stop: al llegar a WANT_SERVERS fuentes reproducibles se corta.
+     * Así sumar webs NO multiplica el tiempo si la primera ya resolvió.
+     */
     var out = [], plan = [
         { n: "PoseidonHD", f: provPoseidon },
         { n: "PelisJuanita", f: provJuanita },
         { n: "Cuevana3", f: provCuevana }
-    ], i, servers = 0;
+    ], i, servers = 0, wp = 0;
+
+    for (i = 0; i < SITES.length; i++) {
+        if (SITES[i].id == "poseidonhd") continue; /* ya va por JSON */
+        var allow = CORE_SITE_IDS[SITES[i].id] || extraSites();
+        if (!allow) continue;
+        if (!extraSites() && wp >= MAX_WP_PROVIDERS) continue;
+        wp++;
+        plan.push({
+            n: SITES[i].name,
+            f: (function (site) {
+                return function () { return provSite(site, ctx); };
+            })(SITES[i])
+        });
+    }
 
     try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
 
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
         if (servers >= WANT_SERVERS) {
-            log("Suficientes servidores (" + servers + "), se omite " + plan[i].n);
+            log("Suficientes servidores (" + servers + "/" + WANT_SERVERS + "), se omite el resto desde " + plan[i].n);
             break;
         }
         log("> " + plan[i].n);
         try {
-            var c = plan[i].f(ctx) || [];
+            var c = plan[i].f() || [];
             servers += resolveCands(c, out, plan[i].n);
         } catch (e) { log("  ERROR " + plan[i].n + ": " + e); }
     }
@@ -1921,6 +2002,7 @@ function collectSources(ctx) {
     idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
     out = [];
     for (j = 0; j < idx.length; j++) out.push(idx[j].s);
+    log("TOTAL reproducibles: " + out.length + " (proveedores con hit ~" + servers + ")");
     return out;
 }
 
@@ -2229,11 +2311,13 @@ function details(url) {
 
     var name = isTv ? (title + " \u00b7 S" + ctx.season + "E" + ctx.episode + (epName ? " \u00b7 " + epName : "")) : (title + (ctx.year ? " (" + ctx.year + ")" : ""));
     var desc = (isTv && epOverview ? epOverview : (base.overview || "")) + "\n\nFuentes: " + sources.length + (sources.length ? "" : " (no se encontr\u00f3 ninguna reproducible)");
-    /* NOTA: un texto "pelishub://..." en la descripcion NO es tocable en GrayJay (solo
-       autodetecta http/https), asi que no sirve como reemplazo de los botones ant/sig.
-       La forma real de saltar de episodio es la lista de "Recomendados" (getContentRecommendations,
-       mas abajo), que GrayJay muestra como videos tocables fuera del panel de Description. */
-    if (debugMode()) desc += "\n\n=== DEBUG ===\n" + _debug;
+    /* Resumen de debug SIEMPRE visible (últimas líneas). GrayJay a veces no muestra
+       bien el panel si no hay sources; así al menos se ve qué proveedor falló. */
+    if (_debug) {
+        var lines = String(_debug).split("\n"), tail = lines.slice(Math.max(0, lines.length - 25)).join("\n");
+        desc += "\n\n=== LOG ===\n" + tail;
+    }
+    if (debugMode()) desc += "\n\n=== DEBUG FULL ===\n" + _debug;
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, isTv ? ("tv_" + p.id + "_" + ctx.season + "_" + ctx.episode) : ("movie_" + p.id), PID),
         name: name,
