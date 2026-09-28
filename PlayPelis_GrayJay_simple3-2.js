@@ -29,16 +29,12 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
-var MAX_CAND = 4;          /* embeds a resolver por proveedor (menos = mas rapido) */
-var WANT_SERVERS = 2;      /* cortar cuando ya hay N fuentes reproducibles */
+var MAX_CAND = 4;          /* embeds a resolver por proveedor */
+var WANT_SERVERS = 2;      /* cortar al tener N fuentes reproducibles */
 var BUDGET_MS = 40000;     /* tiempo maximo por pelicula/episodio */
-/* Sitios WP core (además de Poseidon/Juanita/Cuevana). El resto solo con extraSites=true */
-var CORE_SITE_IDS = {
-    "pelisplus": 1, "pelishouse": 1, "cinetux": 1, "pelispedia": 1,
-    "pelisxd": 1, "allpeliculas": 1, "repelis": 1, "cinecalidad": 1,
-    "pelisplay": 1, "gnula": 1
-};
-var MAX_WP_PROVIDERS = 6;  /* tope de sitios WP por título */
+/* Solo 2 WP además de Poseidon + Juanita + Cuevana = 5 en total */
+var CORE_SITE_IDS = { "pelisplus": 1, "cinecalidad": 1 };
+var MAX_WP_PROVIDERS = 2;
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -443,6 +439,22 @@ function scanMedia(text, label, ref, pageUrl) {
             else if (v.indexOf("//") === 0) v = "https:" + v;
             s = mkSrc(v, label, ref);
             if (s) addSrc(out, s);
+        }
+        /* JWPlayer / Clappr / Videojs: file:"https://..." aunque la query sea larga */
+        re = /(?:file|sources?)\s*:\s*["'](https?:[^"']+)["']/gi;
+        while ((m = re.exec(t)) != null) {
+            if (/\.(?:m3u8|mp4)(?:\?|$)/i.test(m[1]) || /\/hls\//i.test(m[1]) || /type=m3u8/i.test(m[1])) {
+                s = mkSrc(m[1], label, ref);
+                if (s) addSrc(out, s);
+            }
+        }
+        /* sources:[{file:"..."}] */
+        re = /\{\s*file\s*:\s*["'](https?:[^"']+)["']/gi;
+        while ((m = re.exec(t)) != null) {
+            if (/\.(?:m3u8|mp4)/i.test(m[1]) || /m3u8/i.test(m[1])) {
+                s = mkSrc(m[1], label, ref);
+                if (s) addSrc(out, s);
+            }
         }
     }
     return out;
@@ -879,7 +891,10 @@ function resolveEmbed(url, label, ref, depth) {
     d = mkSrc(url, label, ref);
     if (d) return [d];
     if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
-    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0) return exVidhide(url, label, ref);
+    if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0 ||
+        h.indexOf("filelions") >= 0 || h.indexOf("lulustream") >= 0 || h.indexOf("luluvdo") >= 0) {
+        return exVidhide(url, label, ref);
+    }
     if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
     if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
     if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
@@ -890,6 +905,7 @@ function resolveEmbed(url, label, ref, depth) {
     if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
+    /* streamwish / filemoon / mixdrop / supervideo: packer + scanMedia via generico */
     if (h.indexOf("vimeus.") >= 0) {
         /* "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
            JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
@@ -1949,34 +1965,24 @@ function prefetchProviders(ctx) {
 }
 
 function collectSources(ctx) {
-    /*
-     * Orden:
-     *  1) PoseidonHD (JSON por TMDB ID — más rápido)
-     *  2) PelisJuanita
-     *  3) Cuevana3
-     *  4) Sitios WP core (pelisplus, cinetux, …) — cobertura extra
-     *  5) Resto de SITES solo si settings.extraSites = true
-     *
-     * Early-stop: al llegar a WANT_SERVERS fuentes reproducibles se corta.
-     * Así sumar webs NO multiplica el tiempo si la primera ya resolvió.
-     */
-    var out = [], plan = [
-        { n: "PoseidonHD", f: provPoseidon },
-        { n: "PelisJuanita", f: provJuanita },
-        { n: "Cuevana3", f: provCuevana }
-    ], i, servers = 0, wp = 0;
+    /* 5 fuentes max, early-stop. IMPORTANTE: siempre pasar ctx a f(ctx). */
+    var out = [], plan = [], i, servers = 0, site, wp = 0;
+
+    plan.push({ n: "PoseidonHD", f: function (c) { return provPoseidon(c); } });
+    plan.push({ n: "PelisJuanita", f: function (c) { return provJuanita(c); } });
+    plan.push({ n: "Cuevana3", f: function (c) { return provCuevana(c); } });
 
     for (i = 0; i < SITES.length; i++) {
-        if (SITES[i].id == "poseidonhd") continue; /* ya va por JSON */
-        var allow = CORE_SITE_IDS[SITES[i].id] || extraSites();
-        if (!allow) continue;
+        site = SITES[i];
+        if (!site || site.id == "poseidonhd") continue;
+        if (!CORE_SITE_IDS[site.id] && !extraSites()) continue;
         if (!extraSites() && wp >= MAX_WP_PROVIDERS) continue;
         wp++;
         plan.push({
-            n: SITES[i].name,
-            f: (function (site) {
-                return function () { return provSite(site, ctx); };
-            })(SITES[i])
+            n: site.name,
+            f: (function (s) {
+                return function (c) { return provSite(s, c); };
+            })(site)
         });
     }
 
@@ -1985,13 +1991,13 @@ function collectSources(ctx) {
     for (i = 0; i < plan.length; i++) {
         if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
         if (servers >= WANT_SERVERS) {
-            log("Suficientes servidores (" + servers + "/" + WANT_SERVERS + "), se omite el resto desde " + plan[i].n);
+            log("Suficientes servidores (" + servers + "/" + WANT_SERVERS + "), se omite desde " + plan[i].n);
             break;
         }
         log("> " + plan[i].n);
         try {
-            var c = plan[i].f() || [];
-            servers += resolveCands(c, out, plan[i].n);
+            var cands = plan[i].f(ctx) || [];
+            servers += resolveCands(cands, out, plan[i].n);
         } catch (e) { log("  ERROR " + plan[i].n + ": " + e); }
     }
 
@@ -2002,7 +2008,7 @@ function collectSources(ctx) {
     idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
     out = [];
     for (j = 0; j < idx.length; j++) out.push(idx[j].s);
-    log("TOTAL reproducibles: " + out.length + " (proveedores con hit ~" + servers + ")");
+    log("TOTAL reproducibles: " + out.length + " (hits proveedores ~" + servers + ")");
     return out;
 }
 
