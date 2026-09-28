@@ -1,5 +1,5 @@
 /*
- * PelisHub v1 - GrayJay source (ES5)
+ * PelisHub v1.1 - GrayJay source (ES5)
  *
  * Unifica lo aprendido de PlayPelis, EpixPlay y FilmPlus:
  *  - Catalogo: TMDB (Home / Busqueda no dependen de webs externas).
@@ -7,11 +7,13 @@
  *      PoseidonHD2  -> JSON Next.js por TMDB ID (mas rapido, sin scrapear titulo)
  *      PelisJuanita -> movieInfo/serieInfo + buscador propio
  *      Cuevana3     -> slug / busqueda
- *  - Extractores: voe, uqload, streamtape, dood, streamwish, vidhide, filemoon, etc.
+ *  - Extractores: voe, uqload, streamtape, dood, familia packer (vidhide/wish/filemoon), etc.
  *  - Series: canal TMDB con temporadas/episodios.
  *  - Early-stop: WANT_SERVERS corta al tener N fuentes reproducibles.
+ *  - Providers[] con prefetch por proveedor; router parseAny; HLS/MP4/DASH.
  *
  * Debug: debugMode en settings -> bloque === DEBUG === en la descripcion.
+ * extraSites: catalogo Juanita/JKAnime + sitios WP extra.
  */
 
 var PLATFORM = "PelisHub";
@@ -29,19 +31,11 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 
 var MAX_ITEMS = 40;
 var MAX_HTML = 1200000;
-var MAX_CAND = 4;
-var WANT_SERVERS = 2;      /* 2 fuentes: no quemar 40s en sitios muertos */
+var MAX_CAND = 3;
+var WANT_SERVERS = 2;      /* 2 fuentes por título (si una satura, queda la otra) */
 var BUDGET_MS = 35000;
-/* Películas vs series: listas distintas (series/novelas primero si es TV). */
-var CORE_MOVIE_IDS = {
-    "pelisplus": 1, "pelisflix": 1, "pelisxd": 1,
-    "entrepeliculas": 1, "pelisplushd100": 1, "milpelis": 1, "pelispop": 1
-};
-var CORE_SERIES_IDS = {
-    "tvserieslatino": 1, "seriesbiblicas": 1, "serieslan": 1,
-    "retrotve": 1, "retrocanal": 1, "serieslandia": 1
-};
-var MAX_WP_PROVIDERS = 8;
+var CORE_SITE_IDS = { "pelisplus": 1, "cinecalidad": 1 };
+var MAX_WP_PROVIDERS = 2;
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -51,7 +45,7 @@ var _settings = {};
 var _debug = "";
 var _fail = {};
 var _okh = {};
-var FAIL_EXPIRE_MS = 8000;
+var FAIL_EXPIRE_MS = 15000;
 var _deadline = 0;
 var _pre = {};
 var _spCache = {};          /* seriesplayer → m3u8 */
@@ -235,7 +229,7 @@ function hostDead(h) {
        rate-limit) deje un dominio bloqueado para el resto de la sesion. */
     var e = _fail[h];
     if (!e || Date.now() - e.at > FAIL_EXPIRE_MS) return false;
-    return e.count >= 3 && !_okh[h];
+    return e.count >= 2 && !_okh[h];
 }
 
 /* descarga varias URLs en paralelo (http.batch) y las deja en cache (_pre) para
@@ -373,6 +367,19 @@ function parseInternal(url) {
     if (m) return { kind: "show", id: m[1] };
     return null;
 }
+function parseAny(url) {
+    var p = parseInternal(url);
+    if (p) return { origin: "tmdb", p: p };
+    if (typeof juanitaParseInternal == "function") {
+        p = juanitaParseInternal(url);
+        if (p) return { origin: "juanita", p: p };
+    }
+    if (typeof jkParseInternal == "function") {
+        p = jkParseInternal(url);
+        if (p) return { origin: "jk", p: p };
+    }
+    return null;
+}
 
 /* ------------------------------------------------------------------ */
 /* fuentes de video                                                    */
@@ -392,19 +399,27 @@ function reqMod(ref) {
         }
     };
 }
-/* force = "hls" | "mp4": para URLs sin extension (ok.ru, vk, vimeo...) */
+function inferMediaType(u) {
+    u = String(u || "");
+    if (/\.mpd(?:[?#]|$)/i.test(u) || /[?&](?:format|type)=(?:dash|mpd)/i.test(u) || /\/dash\//i.test(u)) return "dash";
+    if (/\.m3u8(?:[?#]|$)/i.test(u) || /[?&](?:format|type)=m3u8/i.test(u) || /\/hls\//i.test(u) || /playlist\.m3u8/i.test(u)) return "hls";
+    if (/\.mp4(?:[?#]|$)/i.test(u) || /[?&](?:format|type)=mp4/i.test(u)) return "mp4";
+    return "";
+}
+/* force = "hls" | "mp4" | "dash": para URLs sin extension (ok.ru, vk, vimeo...) */
 function mkSrc(u, label, ref, force) {
     u = cleanUrl(u);
     if (!/^https?:\/\//i.test(u)) return null;
-    var rm = reqMod(ref), o, type = force || "";
-    if (!type) {
-        if (/\.m3u8(?:[?#]|$)/i.test(u) || /[?&](?:format|type)=m3u8/i.test(u)) type = "hls";
-        else if (/\.mp4(?:[?#]|$)/i.test(u)) type = "mp4";
-    }
+    var rm = reqMod(ref), o, type = force || inferMediaType(u);
     if (type == "hls") {
         o = { name: label || "HLS", url: u, duration: 0 };
         if (rm) o.requestModifier = rm;
         return new HLSSource(o);
+    }
+    if (type == "dash" && typeof DashSource == "function") {
+        o = { name: label || "DASH", url: u, duration: 0 };
+        if (rm) o.requestModifier = rm;
+        try { return new DashSource(o); } catch (e) { log("mkSrc dash -> " + e); }
     }
     if (type == "mp4") {
         o = { width: 0, height: 0, container: "video/mp4", codec: "", name: label || "MP4", bitrate: 0, duration: 0, url: u };
@@ -444,9 +459,9 @@ function scanMedia(text, label, ref, pageUrl) {
     for (i = 0; i < un.length; i++) texts.push(un[i]);
     for (i = 0; i < texts.length; i++) {
         var t = texts[i].replace(/\\\//g, "/").replace(/\\u0026/g, "&").replace(/\\u002F/gi, "/");
-        re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4)(?:\?[^\s"'<>\\]*)?/gi;
+        re = /https?:\/\/[^\s"'<>\\]+?\.(?:m3u8|mp4|mpd)(?:\?[^\s"'<>\\]*)?/gi;
         while ((m = re.exec(t)) != null) addSrc(out, mkSrc(m[0], label, ref));
-        re = /["']?(?:file|src|source|hls\d*|url|link|stream|playlist)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']/gi;
+        re = /["']?(?:file|src|source|hls\d*|url|link|stream|playlist|dash)["']?\s*[:=]\s*["']([^"']+\.(?:m3u8|mp4|mpd)[^"']*)["']/gi;
         while ((m = re.exec(t)) != null) {
             var v = m[1];
             if (v.charAt(0) == "/" && v.charAt(1) != "/" && base) v = base + v;
@@ -457,7 +472,7 @@ function scanMedia(text, label, ref, pageUrl) {
         /* JWPlayer / Clappr / Videojs: file:"https://..." aunque la query sea larga */
         re = /(?:file|sources?)\s*:\s*["'](https?:[^"']+)["']/gi;
         while ((m = re.exec(t)) != null) {
-            if (/\.(?:m3u8|mp4)(?:\?|$)/i.test(m[1]) || /\/hls\//i.test(m[1]) || /type=m3u8/i.test(m[1])) {
+            if (inferMediaType(m[1]) || /\/hls\//i.test(m[1]) || /m3u8|mpd/i.test(m[1])) {
                 s = mkSrc(m[1], label, ref);
                 if (s) addSrc(out, s);
             }
@@ -465,7 +480,7 @@ function scanMedia(text, label, ref, pageUrl) {
         /* sources:[{file:"..."}] */
         re = /\{\s*file\s*:\s*["'](https?:[^"']+)["']/gi;
         while ((m = re.exec(t)) != null) {
-            if (/\.(?:m3u8|mp4)/i.test(m[1]) || /m3u8/i.test(m[1])) {
+            if (inferMediaType(m[1]) || /m3u8|mpd/i.test(m[1])) {
                 s = mkSrc(m[1], label, ref);
                 if (s) addSrc(out, s);
             }
@@ -496,6 +511,24 @@ function hostMatches(h, list) {
     return false;
 }
 function isServerUrl(u) { return hostMatches(hostOf(u), SERVER_HOSTS); }
+function isPackerFamily(h) {
+    h = String(h || "");
+    return h.indexOf("morencius") >= 0 || h.indexOf("hglink") >= 0 || h.indexOf("hgcloud") >= 0 ||
+        h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 ||
+        h.indexOf("filelions") >= 0 || h.indexOf("lulustream") >= 0 || h.indexOf("luluvdo") >= 0 ||
+        h.indexOf("streamwish") >= 0 || h.indexOf("hlswish") >= 0 || h.indexOf("wishembed") >= 0 ||
+        h.indexOf("awish") >= 0 || h.indexOf("embedwish") >= 0 || h.indexOf("filemoon") >= 0;
+}
+/* Wrappers de player (query v= en base64, etc.) → URL real del host. Sin GET extra. */
+function unwrapEmbedUrl(url) {
+    var u = cleanUrl(url), m, real;
+    m = /[?&]v=([^&]+)/.exec(u);
+    if (m) {
+        real = cleanUrl(b64decode(dec(m[1])));
+        if (/^https?:\/\//i.test(real) && real != u) return real;
+    }
+    return u;
+}
 
 /* --- extractores especificos (portados de PlayPelis) --- */
 /* ---- utilidades para los extractores nuevos ---- */
@@ -923,16 +956,22 @@ function resolveEmbed(url, label, ref, depth) {
     try {
         url = cleanUrl(url);
         if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
+        var unwrapped = unwrapEmbedUrl(url);
+        if (unwrapped != url) {
+            log("    wrapper -> " + unwrapped.substring(0, 120));
+            return resolveEmbed(unwrapped, label, ref, depth + 1);
+        }
         var h = hostOf(url), d;
+        if (hostMatches(h, UNSUPPORTED)) { log("  skip unsupported: " + h); return []; }
         /* Juanita seriesplayer / fortamomar / CDNs de m3u8 directo */
         if (/fortamomar\.workers\.dev$/i.test(h) || /seriesplayer\./i.test(h) ||
             /onfilom\.com$/i.test(h) || /playspelis\.com$/i.test(h) || /321moviesfree\.com$/i.test(h) ||
             /flixlat\.com$/i.test(h)) {
-            if (/\.m3u8/i.test(url)) {
+            if (/\.m3u8/i.test(url) || inferMediaType(url) == "hls") {
                 var s0 = mkSrc(url, label || "Juanita HLS", ref || "https://seriesplayer.fortamomar.workers.dev/", "hls");
                 return s0 ? [s0] : [];
             }
-            if (/\.mp4(?:\?|$)/i.test(url)) {
+            if (inferMediaType(url) == "mp4") {
                 var s1 = mkSrc(url, label || "Juanita MP4", ref, "mp4");
                 return s1 ? [s1] : [];
             }
@@ -941,23 +980,10 @@ function resolveEmbed(url, label, ref, depth) {
         if (/player\.poseidonhd2\.co$/i.test(h) || (/poseidonhd2\.co$/i.test(h) && /\/(?:player|download)\.php/i.test(url))) {
             return exPoseidonPlayer(url, label, ref);
         }
-        if (/\.cuevana3e\.pro$/i.test(h)) {
-            var vParam = /[?&]v=([^&]+)/.exec(url);
-            if (vParam) {
-                var real = cleanUrl(b64decode(dec(vParam[1])));
-                if (/^https?:\/\//i.test(real) && real != url) {
-                    log("    cuevana3e proxy -> " + real.substring(0, 120));
-                    return resolveEmbed(real, label, ref, depth + 1);
-                }
-            }
-        }
         d = mkSrc(url, label, ref);
         if (d) return [d];
-        if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
-        /* morencius / hglink / hgcloud = familia vidhide (packer → acek-cdn m3u8) */
-        if (h.indexOf("morencius") >= 0 || h.indexOf("hglink") >= 0 || h.indexOf("hgcloud") >= 0 ||
-            h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 ||
-            h.indexOf("filelions") >= 0 || h.indexOf("lulustream") >= 0 || h.indexOf("luluvdo") >= 0) {
+        /* familia packer (vidhide / wish / filemoon / filelions): mismo camino, luego genérico */
+        if (isPackerFamily(h)) {
             var vh = exVidhide(url, label, ref);
             if (vh && vh.length) return vh;
             return exGeneric(url, label, ref, depth);
@@ -1313,11 +1339,14 @@ function juanitaRememberSlug(ctx, slug) {
         log("  Juanita index: tmdb=" + ctx.id + " -> " + slug);
     }
 }
+function juanitaCachedSlug(ctx) {
+    return (ctx && ctx.id && _juanitaSlugIndex[String(ctx.id)]) ? _juanitaSlugIndex[String(ctx.id)] : "";
+}
 function juanitaSlugCandidates(ctx) {
+    /* Slug ya confirmado para este TMDB id: no adivinar otras 4 variantes. */
+    var cached = juanitaCachedSlug(ctx);
+    if (cached) return [cached];
     var raw = uniq([ctx.titleEn, ctx.titleEs, ctx.titleOrig].concat(ctx.altTitles || [])), out = [], i, s;
-    if (ctx && ctx.id && _juanitaSlugIndex[String(ctx.id)]) {
-        out.push(_juanitaSlugIndex[String(ctx.id)]);
-    }
     for (i = 0; i < raw.length; i++) {
         s = trimDash(slugJuanita(raw[i]));
         if (!s) continue;
@@ -1328,6 +1357,7 @@ function juanitaSlugCandidates(ctx) {
 }
 function provJuanita(ctx) {
     var base = "https://pelisjuanita.com", slugs = juanitaSlugCandidates(ctx), urls = [], i;
+    var known = !!juanitaCachedSlug(ctx);
     for (i = 0; i < slugs.length; i++) {
         urls.push(ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + slugs[i]
             : base + "/series/serieInfo.php?nombreSerie=" + slugs[i] + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode);
@@ -1344,6 +1374,10 @@ function provJuanita(ctx) {
         if (items.length) hits.push({ slug: slugs[i], items: items });
     }
     if (hits.length) {
+        if (known) {
+            log("  slug cacheado, sin verificar pagina: " + hits[0].slug);
+            return hits[0].items;
+        }
         /* de todos los slugs que devolvieron servidores, verificar en paralelo la
            pagina real (/movies/pelicula/<slug>, confirmada por el usuario) y
            quedarse con el primero -en orden de prioridad- que confirme titulo/año.
@@ -1694,32 +1728,18 @@ function parseCuevana(html, base) {
    usa /pelicula/ y /serie/<slug>/episodio-SxE) y sin endpoint de busqueda conocido. */
 var CUEVANA_FAMILIES = [
     {
-        bases: ["https://cuevana3e.pro", "https://wv3.cuevana3.eu", "https://cuevana3.ai"],
-        movie: function (base, slug) {
-            if (/cuevana3e\.pro/i.test(base)) return base + "/pelicula/" + slug;
-            return base + "/ver-pelicula/" + slug;
-        },
-        episode: function (base, slug, s, e) {
-            if (/cuevana3e\.pro/i.test(base)) return base + "/serie/" + slug + "/episodio-" + s + "x" + e;
-            return base + "/episodio/" + slug + "-temporada-" + s + "-episodio-" + e;
-        },
-        search: function (base, q) {
-            if (/cuevana3e\.pro/i.test(base)) return base + "/?s=" + enc(q);
-            return base + "/search?q=" + enc(q);
-        }
-    },
-    {
-        bases: ["https://www.cuevana3.eu", "https://cuevana3.me", "https://cuevana3.cc"],
+        bases: ["https://www.cuevana3.eu", "https://cuevana3.ai", "https://cuevana3.me", "https://cuevana3.cc"],
         movie: function (base, slug) { return base + "/ver-pelicula/" + slug; },
         episode: function (base, slug, s, e) { return base + "/episodio/" + slug + "-temporada-" + s + "-episodio-" + e; },
         search: function (base, q) { return base + "/search?q=" + enc(q); }
+    },
+    {
+        bases: ["https://cuevana3e.pro"],
+        movie: function (base, slug) { return base + "/pelicula/" + slug; },
+        episode: function (base, slug, s, e) { return base + "/serie/" + slug + "/episodio-" + s + "x" + e; },
+        search: null
     }
 ];
-function cuevanaAltSlugs(ctx) {
-    var out = [], i, alts = ctx.altTitles || [];
-    for (i = 0; i < alts.length && i < 2; i++) { var s = slugCuevana(alts[i]); if (s) out.push(s); }
-    return out;
-}
 function provCuevana(ctx) {
     var fi, bi, i;
     for (fi = 0; fi < CUEVANA_FAMILIES.length && budgetLeft(); fi++) {
@@ -1729,35 +1749,49 @@ function provCuevana(ctx) {
             for (i = 0; i < baseSlugs.length; i++) { if (ctx.year) slugs.push(baseSlugs[i] + "-" + ctx.year); slugs.push(baseSlugs[i]); }
             slugs = uniq(slugs);
             var urls = [];
-            for (i = 0; i < Math.min(slugs.length, 4); i++) urls.push(ctx.kind == "movie" ? fam.movie(base, slugs[i]) : fam.episode(base, slugs[i], ctx.season, ctx.episode));
+            for (i = 0; i < slugs.length; i++) urls.push(ctx.kind == "movie" ? fam.movie(base, slugs[i]) : fam.episode(base, slugs[i], ctx.season, ctx.episode));
             var bodies = batchGet(urls, base + "/"), html = "", pageUrl = "";
             var candIdx = [];
             for (i = 0; i < bodies.length; i++) { if (bodies[i]) reached = true; if (bodies[i] && /data-tr=|data-link=|data-server=/i.test(bodies[i])) candIdx.push(i); }
             for (i = 0; i < candIdx.length; i++) {
+                /* mismo chequeo que en PelisJuanita: el slug sin año puede coincidir
+                   con un homonimo (remake) distinto del que se pidio */
                 var v = verifyPageTitle(bodies[candIdx[i]], ctx);
-                if (v.ok === false) continue;
+                if (v.ok === false) { log("  descartado (no coincide t\u00edtulo/a\u00f1o): " + urls[candIdx[i]].substring(0, 100) + (v.pageTitle ? " -> '" + v.pageTitle + "'" : "")); continue; }
                 html = bodies[candIdx[i]]; pageUrl = urls[candIdx[i]];
+                if (v.ok === true) log("  verificado: '" + v.pageTitle + "'");
                 break;
             }
             if (!html && fam.search && budgetLeft()) {
-                var sh = httpGet(fam.search(base, ctx.titleEs || ctx.titleEn), base + "/");
+                var sh = httpGet(fam.search(base, ctx.titleEs), base + "/");
                 if (sh) {
                     reached = true;
                     var best = pickBest(findLinks(sh, base, ctx.kind), ctx);
                     if (best) {
                         pageUrl = best.url;
-                        if (ctx.kind == "tv") pageUrl = fam.episode(base, String(best.url).split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop(), ctx.season, ctx.episode);
+                        if (ctx.kind == "tv") {
+                            var slug = String(best.url).split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop();
+                            pageUrl = fam.episode(base, slug, ctx.season, ctx.episode);
+                        }
                         html = httpGet(pageUrl, base + "/");
                     }
                 }
+            }
+            if (!html && reached) {
+                /* variante sin data-tr visible (front-end distinto, ej. cuevana3e.pro):
+                   usar la primera pagina alcanzada y dejar que el escaneo generico
+                   busque iframes/medios sueltos en vez del parser especifico */
+                for (i = 0; i < bodies.length; i++) if (bodies[i]) { html = bodies[i]; pageUrl = urls[i]; break; }
             }
             if (html) {
                 var items = parseCuevana(html, base);
                 if (!items.length) {
                     var links = discoverLinks(html, pageUrl), j;
                     for (j = 0; j < links.length; j++) items.push(mkCand(links[j], "", pageUrl, "Cuevana3"));
+                    var direct = scanMedia(html, "", pageUrl, pageUrl), k;
+                    for (k = 0; k < direct.length; k++) items.push({ url: "", lang: "", srcs: [direct[k]], prov: "Cuevana3" });
                 }
-                log("  " + String(pageUrl).substring(0, 100) + " -> " + items.length + " players");
+                log("  " + pageUrl.substring(0, 100) + " -> " + items.length + " players");
                 if (items.length) return items;
             }
             if (reached) break;
@@ -1765,83 +1799,30 @@ function provCuevana(ctx) {
     }
     return [];
 }
-
+/* variantes extra de slug de Cuevana usando los titulos alternativos de TMDB
+   (AKAs), capadas para no multiplicar demasiado los intentos de red */
+function cuevanaAltSlugs(ctx) {
+    var out = [], i, alts = ctx.altTitles || [];
+    for (i = 0; i < alts.length && i < 2; i++) { var s = slugCuevana(alts[i]); if (s) out.push(s); }
+    return out;
+}
 
 /* ------------------------------------------------------------------ */
-/* Sitios WP / PelisPlus (movie vs series)                             */
+/* sitios WordPress / DooPlay / Toroflix (dominios de FilmPlus/PlayPelis) */
 /* ------------------------------------------------------------------ */
 
 var SITES = [
-    { id: "pelisplus", name: "PelisPlusHD", kind: "movie", bases: [
-        "https://pelisplushd.baby",
-        "https://pelisplus-hd.rest",
-        "https://pelisplushd.bz",
-        "https://milpelis.net"
-      ], search: ["/search?s={q}", "/search/{q}/1", "/inicio/?s={q}"], mode: "pelisplus" },
-    { id: "pelisflix", name: "Pelisflix1", kind: "movie", bases: ["https://pelisflix1.tv", "https://pelisflix1.fans"], search: ["/?s={q}"], mode: "wp" },
-    { id: "pelisxd", name: "PelisXD", kind: "movie", bases: ["https://www.pelisxd.com"], search: ["/?s={q}"], mode: "wp" },
-    { id: "entrepeliculas", name: "EntrePeliculas", kind: "movie", bases: ["https://entrepeliculasyseries.nz"], search: ["/?s={q}"], mode: "wp" },
-    { id: "pelisplushd100", name: "PelisPlus100", kind: "movie", bases: ["https://pelisplushd100.lol"], search: ["/search?s={q}", "/?s={q}"], mode: "pelisplus" },
-    { id: "milpelis", name: "MilPelis", kind: "movie", bases: ["https://milpelis.net"], search: ["/search?s={q}", "/inicio/?s={q}"], mode: "pelisplus" },
-    { id: "pelispop", name: "PelisPop", kind: "movie", bases: ["https://pelispop.mov"], search: ["/?s={q}"], mode: "wp" },
-    { id: "tvserieslatino", name: "TVSeriesLatino", kind: "series", bases: ["https://www.tvserieslatino.com"], search: ["/?s={q}"], mode: "wp" },
-    { id: "seriesbiblicas", name: "SeriesBiblicas", kind: "series", bases: ["https://seriesbiblicas.net"], search: ["/?s={q}"], mode: "wp" },
-    { id: "serieslan", name: "SeriesLan", kind: "series", bases: ["https://serieslan.lat"], search: ["/?s={q}"], mode: "wp" },
-    { id: "retrotve", name: "RetroTVE", kind: "series", bases: ["https://retrotve.com"], search: ["/?s={q}"], mode: "wp" },
-    { id: "retrocanal", name: "RetroCanal", kind: "series", bases: ["https://retrocanal.net"], search: ["/?s={q}"], mode: "wp" },
-    { id: "serieslandia", name: "SeriesLandia", kind: "series", bases: ["https://serieslandia.com"], search: ["/?s={q}"], mode: "wp" }
+    { id: "pelisplus", name: "PelisPlus", bases: ["https://pelisplushd.bz", "https://pelisplushd.nu"], search: ["/search?s={q}", "/search/{q}/1"], mode: "pelisplus" },
+    { id: "cinecalidad", name: "Cinecalidad", bases: ["https://cinecalidad.onl"], search: ["/?s={q}"], mode: "wp" }
 ];
 
+/* variantes de consulta para buscar en un sitio: titulo es/en + hasta 2 AKAs de
+   TMDB, asi un titulo "nombrado distinto" en el sitio (doblaje/region) igual
+   aparece en alguna de las busquedas */
 function siteQueries(ctx) {
     return uniq([ctx.titleEs, ctx.titleEn].concat((ctx.altTitles || []).slice(0, 2))).slice(0, 4);
 }
-function tmdbSlugList(ctx) {
-    var raw = uniq([ctx.titleEs, ctx.titleEn, ctx.titleOrig].concat(ctx.altTitles || [])), out = [], i, s;
-    for (i = 0; i < raw.length; i++) {
-        if (!raw[i]) continue;
-        s = slugCuevana(raw[i]);
-        if (!s) continue;
-        if (ctx.year) out.push(s + "-" + ctx.year);
-        out.push(s);
-        s = trimDash(slugJuanita(raw[i]));
-        if (s) {
-            if (ctx.year) out.push(s + "-" + ctx.year);
-            out.push(s);
-        }
-    }
-    return uniq(out).slice(0, 4);
-}
-function tmdbDirectUrls(site, ctx) {
-    var slugs = tmdbSlugList(ctx).slice(0, 2), urls = [], bi, si, base, s;
-    var maxBases = Math.min(site.bases.length, 2);
-    for (bi = 0; bi < maxBases && urls.length < 3; bi++) {
-        base = site.bases[bi].replace(/\/+$/, "");
-        for (si = 0; si < slugs.length && urls.length < 3; si++) {
-            s = slugs[si];
-            if (site.mode == "pelisplus") {
-                if (ctx.kind == "movie") urls.push(base + "/pelicula/" + s);
-                else urls.push(base + "/series/" + (ctx.id || "") + "/" + s + "/");
-            } else {
-                if (ctx.kind == "movie") urls.push(base + "/pelicula/" + s);
-                else urls.push(base + "/serie/" + s);
-            }
-        }
-    }
-    return uniq(urls);
-}
 function siteFind(site, ctx) {
-    var direct = tmdbDirectUrls(site, ctx), di, dHtml, dUrl;
-    for (di = 0; di < direct.length && budgetLeft(); di++) {
-        dUrl = direct[di];
-        dHtml = httpGet(dUrl, site.bases[0] + "/");
-        if (!dHtml || dHtml.length < 4000) continue;
-        if (/no (encontr|exist)|not found|404|p[aá]gina no|just a moment/i.test(dHtml) && dHtml.length < 12000) continue;
-        if (!/iframe|data-url|data-src|dooplay|player|embed|trembed|wp-content|video/i.test(dHtml)) continue;
-        var v = verifyPageTitle(dHtml, ctx);
-        if (v.ok === false) continue;
-        log("  TMDB-slug OK: " + dUrl.substring(0, 100) + (v.pageTitle ? " ('" + v.pageTitle + "')" : ""));
-        return { html: dHtml, url: dUrl, base: originOf(dUrl) };
-    }
     var qs = siteQueries(ctx), bi, qi, pi;
     for (bi = 0; bi < site.bases.length && budgetLeft(); bi++) {
         var base = site.bases[bi], reached = false;
@@ -1859,21 +1840,26 @@ function siteFind(site, ctx) {
     }
     return null;
 }
+
 function episodeLink(html, base, s, e) {
     var re = /<a\b[^>]*href=["']([^"']+)["']/gi, m, S = String(s), E = String(e);
     var p1 = new RegExp("[-/]0*" + S + "x0*" + E + "(?:[/?#]|$)", "i");
     var p2 = new RegExp("(?:temporada|season)-0*" + S + "[-/]+(?:episodio|episode|capitulo)-0*" + E + "(?:[/?#]|$)", "i");
     var p3 = new RegExp("/season/0*" + S + "/episode/0*" + E + "(?:[/?#]|$)", "i");
-    var p4 = new RegExp("/series/\\d+-" + S + "-" + E + "/", "i");
-    while ((m = re.exec(html || "")) != null) {
-        if (p1.test(m[1]) || p2.test(m[1]) || p3.test(m[1]) || p4.test(m[1])) return absUrl(m[1], base);
-    }
+    while ((m = re.exec(html || "")) != null) { if (p1.test(m[1]) || p2.test(m[1]) || p3.test(m[1])) return absUrl(m[1], base); }
     return "";
 }
-function pelisplusEpisodeUrl(pageUrl, season, episode) {
-    var m = /\/series\/(\d+)(?:-\d+(?:-\d+)?)?\/([^\/?#]+)/i.exec(String(pageUrl || ""));
-    if (!m) return "";
-    return originOf(pageUrl) + "/series/" + m[1] + "-" + season + "-" + episode + "/" + m[2] + "/";
+
+/* extrae una URL de embed de un texto (iframe, url suelta o JSON) */
+function embedFromText(t) {
+    t = String(t || "").replace(/\\\//g, "/").replace(/\\"/g, '"');
+    var m = /<iframe[^>]+(?:src|data-src)=["']([^"']+)/i.exec(t);
+    if (m) return cleanUrl(m[1]);
+    m = /^\s*(https?:\/\/[^\s"'<>]+|\/\/[^\s"'<>]+)/i.exec(t);
+    if (m) return cleanUrl(m[1]);
+    m = /"(?:embed_url|url|link|file|iframe|src)"\s*:\s*"([^"]+)"/i.exec(t);
+    if (m) return cleanUrl(m[1]);
+    return "";
 }
 function deepUrls(node, out, depth) {
     if (!node || depth > 6 || out.length > 30) return;
@@ -1886,16 +1872,7 @@ function deepUrls(node, out, depth) {
     var k;
     for (k in node) if (node.hasOwnProperty(k)) deepUrls(node[k], out, depth + 1);
 }
-function embedFromText(t) {
-    t = String(t || "").replace(/\\\//g, "/").replace(/\\"/g, '"');
-    var m = /<iframe[^>]+(?:src|data-src)=["']([^"']+)/i.exec(t);
-    if (m) return cleanUrl(m[1]);
-    m = /^\s*(https?:\/\/[^\s"'<>]+|\/\/[^\s"'<>]+)/i.exec(t);
-    if (m) return cleanUrl(m[1]);
-    m = /"(?:embed_url|url|link|file|iframe|src)"\s*:\s*"([^"]+)"/i.exec(t);
-    if (m) return cleanUrl(m[1]);
-    return "";
-}
+
 function dooEmbed(base, post, nume, type, pageUrl) {
     var b = httpPost(base + "/wp-admin/admin-ajax.php", "action=doo_player_ajax&post=" + enc(post) + "&nume=" + enc(nume) + "&type=" + enc(type), pageUrl, { "X-Requested-With": "XMLHttpRequest", "Origin": base }), d = parseJson(b), u = "";
     if (d && d.embed_url) u = embedFromText(d.embed_url);
@@ -1908,6 +1885,7 @@ function dooEmbed(base, post, nume, type, pageUrl) {
     }
     return u ? absUrl(u, base) : "";
 }
+
 function pageCandidates(html, pageUrl, base, site, ctx) {
     var cands = [], tags, i, a, u, prov = site.name;
     if (!html) return cands;
@@ -1986,28 +1964,25 @@ function provSite(site, ctx) {
     if (!f) { log("  sin resultado"); return []; }
     pageUrl = f.url;
     if (ctx.kind == "tv") {
-        if (!/\/series\/\d+-\d+-\d+\/|\/season\/\d+\/episode\/\d+|episodio-\d+x\d+/i.test(pageUrl)) {
-            var ep = "";
-            if (/\/series\/\d+/i.test(pageUrl) || site.mode == "pelisplus") {
-                ep = pelisplusEpisodeUrl(pageUrl, ctx.season || 1, ctx.episode || 1);
-            }
-            if (!ep) {
-                var sh = f.html || httpGet(pageUrl, f.base + "/");
-                ep = episodeLink(sh, f.base, ctx.season, ctx.episode);
-            }
-            if (!ep) { log("  episodio " + ctx.season + "x" + ctx.episode + " no encontrado"); return []; }
-            pageUrl = ep;
-            f.html = null;
-            log("  episodio URL: " + String(pageUrl).substring(0, 120));
+        var ep = "";
+        if (site.mode == "pelisplus" && /\/serie\//i.test(pageUrl)) ep = pageUrl.replace(/\/+$/, "") + "/season/" + ctx.season + "/episode/" + ctx.episode;
+        else {
+            var sh = httpGet(pageUrl, f.base + "/");
+            ep = episodeLink(sh, f.base, ctx.season, ctx.episode);
         }
+        if (!ep) { log("  episodio " + ctx.season + "x" + ctx.episode + " no encontrado"); return []; }
+        pageUrl = ep;
     }
-    html = f.html || httpGet(pageUrl, f.base + "/");
+    html = httpGet(pageUrl, f.base + "/");
     if (!html) { log("  pagina vacia"); return []; }
     var c = pageCandidates(html, pageUrl, f.base, site, ctx);
     log("  " + pageUrl.substring(0, 100) + " -> " + c.length + " candidatos");
     return c;
 }
 
+/* ------------------------------------------------------------------ */
+/* PlPro.org (API propia, ultimo recurso si nada del scraping resulta) */
+/* ------------------------------------------------------------------ */
 
 function plproGet(path) {
     var sep = path.indexOf("?") >= 0 ? "&" : "?";
@@ -2051,38 +2026,60 @@ function provPlPro(ctx) {
    llegue a pedir esa misma URL con httpGet() la va a tener lista al instante en
    vez de esperar su turno -> el "cuello de botella" deja de ser la suma de cada
    request y pasa a ser, aproximadamente, el mas lento de ellos. */
-function prefetchProviders(ctx) {
-    /* Paralelo: Poseidon JSON + slugs TMDB de sitios top + Cuevana (Juanita al final, suele CF). */
-    var urls = [], slug1, fam, bid, id, i, site, d;
+function poseidonPrefetchUrls(ctx) {
+    var urls = [], bid, id;
+    if (!ctx || !ctx.id) return urls;
     try {
-        if (ctx && ctx.id) {
-            bid = poseidonBuildId();
-            id = String(ctx.id);
-            if (ctx.kind == "movie") {
-                urls.push(POSEIDON_BASE + "/_next/data/" + bid + "/es/pelicula/" + id + "/x.json?tmdb=" + enc(id) + "&movie=x");
-            } else {
-                urls.push(POSEIDON_BASE + "/_next/data/" + bid + "/es/serie/" + id + "/x/temporada/" +
-                    (ctx.season || 1) + "/episodio/" + (ctx.episode || 1) +
-                    ".json?tmdb=" + enc(id) + "&serie=x&season=" + (ctx.season || 1) + "&episode=" + (ctx.episode || 1));
-            }
+        bid = poseidonBuildId();
+        id = String(ctx.id);
+        if (ctx.kind == "movie") {
+            urls.push(POSEIDON_BASE + "/_next/data/" + bid + "/es/pelicula/" + id + "/x.json?tmdb=" + enc(id) + "&movie=x");
+        } else {
+            urls.push(POSEIDON_BASE + "/_next/data/" + bid + "/es/serie/" + id + "/x/temporada/" +
+                (ctx.season || 1) + "/episodio/" + (ctx.episode || 1) +
+                ".json?tmdb=" + enc(id) + "&serie=x&season=" + (ctx.season || 1) + "&episode=" + (ctx.episode || 1));
         }
     } catch (e) { log("prefetch poseidon -> " + e); }
+    return urls;
+}
+function juanitaPrefetchUrls(ctx) {
+    var urls = [], jslug;
+    jslug = juanitaCachedSlug(ctx) || slugJuanita(ctx.titleEs || ctx.titleEn || "");
+    if (!jslug) return urls;
+    if (ctx.kind == "movie") urls.push("https://pelisjuanita.com/movies/movieInfo.php?title=" + enc(jslug));
+    else urls.push("https://pelisjuanita.com/series/serieInfo.php?nombreSerie=" + enc(jslug) +
+        "&nroTemporada=" + enc(ctx.season || 1) + "&nroEpisodio=" + enc(ctx.episode || 1));
+    return urls;
+}
+function cuevanaPrefetchUrls(ctx) {
+    var slug1 = slugCuevana(ctx.titleEs || ctx.titleEn || ""), fam = CUEVANA_FAMILIES[0];
+    if (!slug1 || !fam) return [];
+    return [ctx.kind == "movie" ? fam.movie(fam.bases[0], slug1) : fam.episode(fam.bases[0], slug1, ctx.season, ctx.episode)];
+}
 
-    /* pocas URLs directas TMDB de sitios prioritarios según movie/tv */
-    var prefIds = (ctx.kind == "tv") ? CORE_SERIES_IDS : CORE_MOVIE_IDS;
-    for (i = 0; i < SITES.length && urls.length < 10; i++) {
-        site = SITES[i];
-        if (!site || !prefIds[site.id]) continue;
-        d = tmdbDirectUrls(site, ctx);
-        if (d.length) urls.push(d[0]);
-    }
+var PROVIDERS = [
+    { id: "poseidon", name: "PoseidonHD", fast: 1, prefetch: poseidonPrefetchUrls, candidates: provPoseidon },
+    { id: "juanita", name: "PelisJuanita", fast: 1, prefetch: juanitaPrefetchUrls, candidates: provJuanita },
+    { id: "cuevana", name: "Cuevana3", fast: 0, prefetch: cuevanaPrefetchUrls, candidates: provCuevana }
+];
 
-    slug1 = slugCuevana(ctx.titleEs || ctx.titleEn || "");
-    fam = CUEVANA_FAMILIES[0];
-    if (slug1 && fam) {
-        urls.push(ctx.kind == "movie" ? fam.movie(fam.bases[0], slug1) : fam.episode(fam.bases[0], slug1, ctx.season, ctx.episode));
+function prefetchProviders(ctx) {
+    var urls = [], i, extra;
+    for (i = 0; i < PROVIDERS.length; i++) {
+        try { extra = PROVIDERS[i].prefetch(ctx) || []; } catch (e) { extra = []; }
+        urls = urls.concat(extra);
     }
     prefetchUrls(urls);
+}
+
+function sortSourcesByLang(out) {
+    var idx = [], j, sorted = [];
+    for (j = 0; j < out.length; j++) {
+        idx.push({ s: out[j], i: j, r: langRank(String(out[j].name || "").split(" \u00b7 ")[0]) });
+    }
+    idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
+    for (j = 0; j < idx.length; j++) sorted.push(idx[j].s);
+    return sorted;
 }
 
 function collectSources(ctx) {
@@ -2093,66 +2090,47 @@ function collectSources(ctx) {
      *  3) Cuevana
      *  4) WP solo si aún no hay fuentes
      * Early-stop al alcanzar WANT_SERVERS fuentes reproducibles.
+     * PlPro queda fuera del camino caliente (adaptador huérfano).
      */
-    var out = [], plan = [], i, servers = 0, site, wp = 0;
+    var out = [], i, servers = 0, site, wp = 0, wpPlan = [];
 
-    var isTv = ctx.kind == "tv";
-    var coreIds = isTv ? CORE_SERIES_IDS : CORE_MOVIE_IDS;
-    var fallbackIds = isTv ? CORE_MOVIE_IDS : null;
-
-    /* Rápidos primero: Poseidon + Cuevana + Juanita (ok.ru/novelas) */
-    plan.push({ n: "PoseidonHD", f: function (c) { return provPoseidon(c); }, fast: 1 });
-    plan.push({ n: "Cuevana3", f: function (c) { return provCuevana(c); }, fast: 1 });
-    plan.push({ n: "PelisJuanita", f: function (c) { return provJuanita(c); }, fast: 1 });
-
-    function pushSites(ids, label) {
-        var n = 0;
-        for (i = 0; i < SITES.length; i++) {
-            site = SITES[i];
-            if (!site || !ids[site.id]) continue;
-            if (!extraSites() && n >= MAX_WP_PROVIDERS) break;
-            n++;
-            plan.push({
-                n: site.name + (label ? " " + label : ""),
-                f: (function (s) {
-                    return function (c) { return provSite(s, c); };
-                })(site),
-                fast: 0
-            });
-        }
-        return n;
+    for (i = 0; i < SITES.length; i++) {
+        site = SITES[i];
+        if (!site || site.id == "poseidonhd") continue;
+        if (!CORE_SITE_IDS[site.id] && !extraSites()) continue;
+        if (!extraSites() && wp >= MAX_WP_PROVIDERS) continue;
+        wp++;
+        wpPlan.push({
+            name: site.name,
+            candidates: (function (s) { return function (c) { return provSite(s, c); }; })(site)
+        });
     }
-
-    pushSites(coreIds, "");
-    if (fallbackIds) pushSites(fallbackIds, "(fb)");
 
     try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
 
     function runPlan(list) {
         var k, cands;
         for (k = 0; k < list.length; k++) {
-            if (!budgetLeft()) { log("Tiempo agotado antes de " + list[k].n); break; }
+            if (!budgetLeft()) { log("Tiempo agotado antes de " + list[k].name); break; }
             if (servers >= WANT_SERVERS) {
-                log("Early-stop: " + servers + " fuente(s), se omite " + list[k].n);
+                log("Early-stop: " + servers + " fuente(s), se omite " + list[k].name);
                 break;
             }
-            log("> " + list[k].n);
+            log("> " + list[k].name);
             try {
-                cands = list[k].f(ctx) || [];
-                servers += resolveCands(cands, out, list[k].n);
-            } catch (e) { log("  ERROR " + list[k].n + ": " + e); }
+                cands = list[k].candidates(ctx) || [];
+                servers += resolveCands(cands, out, list[k].name);
+            } catch (e) { log("  ERROR " + list[k].name + ": " + e); }
         }
     }
 
-    runPlan(plan);
-
-    var idx = [], j;
-    for (j = 0; j < out.length; j++) {
-        idx.push({ s: out[j], i: j, r: langRank(String(out[j].name || "").split(" \u00b7 ")[0]) });
+    runPlan(PROVIDERS);
+    if (servers < WANT_SERVERS && budgetLeft() && wpPlan.length) {
+        log("Plan B: sitios WP (" + wpPlan.length + ")");
+        runPlan(wpPlan);
     }
-    idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
-    out = [];
-    for (j = 0; j < idx.length; j++) out.push(idx[j].s);
+
+    out = sortSourcesByLang(out);
     log("TOTAL reproducibles: " + out.length + " (hits ~" + servers + ")");
     return out;
 }
@@ -2398,6 +2376,20 @@ function errorDetails(url, msg) {
    todas las formas en que el catalogo (TMDB) sabe que esa pelicula/serie es
    conocida en paises de habla hispana. */
 var ALT_TITLE_COUNTRIES = { "ES": 1, "MX": 1, "AR": 1, "CO": 1, "CL": 1, "PE": 1, "VE": 1, "US": 1 };
+function ctxFromTmdb(p, es, en, altData, extIds, base) {
+    var ctx = {
+        kind: p.kind, id: p.id, season: p.season || 1, episode: p.episode || 1,
+        titleEs: (es && (es.title || es.name)) || "", titleEn: (en && (en.title || en.name)) || "",
+        titleOrig: (base.original_title || base.original_name) || "",
+        year: yearOf(base.release_date || base.first_air_date),
+        imdbId: (extIds && extIds.imdb_id) || ""
+    };
+    ctx.altTitles = extractAltTitles(altData, [ctx.titleEs, ctx.titleEn, ctx.titleOrig]);
+    ctx.titles = uniq([normalizeTitle(ctx.titleEs), normalizeTitle(ctx.titleEn), normalizeTitle(ctx.titleOrig)].concat(
+        (function () { var o = [], i; for (i = 0; i < ctx.altTitles.length; i++) o.push(normalizeTitle(ctx.altTitles[i])); return o; })()
+    ));
+    return ctx;
+}
 function extractAltTitles(altData, baseTitles) {
     var arr = (altData && (altData.titles || altData.results)) || [], out = [], i, seen = {};
     for (i = 0; i < baseTitles.length; i++) seen[normalizeTitle(baseTitles[i])] = 1;
@@ -2430,17 +2422,7 @@ function details(url) {
     var base = es || en;
     if (!base) return errorDetails(url, "TMDB no respondi\u00f3");
 
-    var ctx = {
-        kind: p.kind, id: p.id, season: p.season || 1, episode: p.episode || 1,
-        titleEs: (es && (es.title || es.name)) || "", titleEn: (en && (en.title || en.name)) || "",
-        titleOrig: (base.original_title || base.original_name) || "",
-        year: yearOf(base.release_date || base.first_air_date),
-        imdbId: (extIds && extIds.imdb_id) || ""
-    };
-    ctx.altTitles = extractAltTitles(altData, [ctx.titleEs, ctx.titleEn, ctx.titleOrig]);
-    ctx.titles = uniq([normalizeTitle(ctx.titleEs), normalizeTitle(ctx.titleEn), normalizeTitle(ctx.titleOrig)].concat(
-        (function () { var o = [], i; for (i = 0; i < ctx.altTitles.length; i++) o.push(normalizeTitle(ctx.altTitles[i])); return o; })()
-    ));
+    var ctx = ctxFromTmdb(p, es, en, altData, extIds, base);
     var poster = img(base.poster_path), title = ctx.titleEs || ctx.titleEn || "Sin t\u00edtulo";
     log("TMDB: es='" + ctx.titleEs + "' en='" + ctx.titleEn + "' year=" + ctx.year + (ctx.imdbId ? " imdb=" + ctx.imdbId : "") + (isTv ? " S" + ctx.season + "E" + ctx.episode : ""));
     if (ctx.altTitles.length) log("TMDB AKAs usados para busqueda: " + ctx.altTitles.join(" | "));
@@ -2463,13 +2445,10 @@ function details(url) {
 
     var name = isTv ? (title + " \u00b7 S" + ctx.season + "E" + ctx.episode + (epName ? " \u00b7 " + epName : "")) : (title + (ctx.year ? " (" + ctx.year + ")" : ""));
     var desc = (isTv && epOverview ? epOverview : (base.overview || "")) + "\n\nFuentes: " + sources.length + (sources.length ? "" : " (no se encontr\u00f3 ninguna reproducible)");
-    /* Resumen de debug SIEMPRE visible (últimas líneas). GrayJay a veces no muestra
-       bien el panel si no hay sources; así al menos se ve qué proveedor falló. */
-    if (_debug) {
-        var lines = String(_debug).split("\n"), tail = lines.slice(Math.max(0, lines.length - 25)).join("\n");
-        desc += "\n\n=== LOG ===\n" + tail;
+    if (debugMode() && _debug) {
+        var lines = String(_debug).split("\n"), tail = lines.slice(Math.max(0, lines.length - 40)).join("\n");
+        desc += "\n\n=== DEBUG ===\n" + tail;
     }
-    if (debugMode()) desc += "\n\n=== DEBUG FULL ===\n" + _debug;
     return new PlatformVideoDetails({
         id: new PlatformID(PLATFORM, isTv ? ("tv_" + p.id + "_" + ctx.season + "_" + ctx.episode) : ("movie_" + p.id), PID),
         name: name,
@@ -2586,14 +2565,22 @@ if (typeof source != "undefined") {
         try {
             resetDebug();
             startBudget();
-            var r = searchPage(q || "", 1), jk = [], ju = [];
-            try { jk = jkSearch(q || ""); } catch (e2) { jk = []; }
-            /* Catálogo propio de PelisJuanita (títulos que TMDB no indexa bien) */
-            try { ju = juanitaSearch(q || ""); } catch (e3) { log("juanitaSearch -> " + e3); ju = []; }
+            q = q || "";
+            var extras = extraSites();
+            var warm = [tmdbUrl("/search/multi?query=" + enc(q) + "&page=1&include_adult=false")];
+            if (extras && q) {
+                warm.push(JK + "/buscar/" + enc(normalizeTitle(q).replace(/\s+/g, "-")) + "/");
+                warm.push(JUANITA_BASE + "/movies/search?s=" + enc(q));
+                warm.push(JUANITA_BASE + "/series/search?s=" + enc(q));
+            }
+            prefetchUrls(warm);
+            var r = searchPage(q, 1), jk = [], ju = [];
+            if (extras) {
+                try { jk = jkSearch(q); } catch (e2) { jk = []; }
+                try { ju = juanitaSearch(q); } catch (e3) { log("juanitaSearch -> " + e3); ju = []; }
+            }
             var first = r.results.concat(ju).concat(jk);
-            /* si la busqueda en espanol no trajo nada de TMDB, reintentar
-               traduciendo la consulta al ingles (titulos muy nuevos que TMDB
-               todavia no tradujo, ej. peliculas anunciadas para 2026). */
+            /* traduccion solo si TMDB no trajo nada (no se paga en el camino bueno) */
             if (!r.results.length && q) {
                 var tq = translateEs2En(q);
                 if (tq && normalizeTitle(tq) != normalizeTitle(q)) {
@@ -2601,12 +2588,13 @@ if (typeof source != "undefined") {
                     if (r2.results.length) { first = first.concat(r2.results); r = r2; }
                 }
             }
-            return makePager(first, r.hasMore, function (pg) { return searchPage(q || "", pg); });
+            return makePager(first, r.hasMore, function (pg) { return searchPage(q, pg); });
         } catch (e) { return new VideoPager([], false, {}); }
     };
     source.getSearchChannelContentsCapabilities = function () { return { types: [FEED_MIXED], sorts: [], filters: [] }; };
     source.searchChannels = function (q) {
         try {
+            if (!extraSites()) return new ChannelPager([], false, {});
             startBudget();
             var ju = juanitaSearch(q || ""), ch = [], i;
             for (i = 0; i < ju.length; i++) {
@@ -2619,34 +2607,43 @@ if (typeof source != "undefined") {
     };
 
     source.isChannelUrl = function (u) {
-        return /^pelishub:\/\/show\/\d+$/.test(String(u || "")) || /^juanita:\/\/show\//.test(String(u || ""));
+        var x = parseAny(u);
+        return !!(x && ((x.origin == "tmdb" && x.p.kind == "show") || (x.origin == "juanita" && x.p.kind == "show")));
     };
     source.getChannel = function (u) {
-        if (isJuanitaUrl(u)) return juanitaShowChannel(u);
+        var x = parseAny(u);
+        if (x && x.origin == "juanita") return juanitaShowChannel(u);
         return channelOf(u);
     };
     source.getChannelCapabilities = function () { return { types: [FEED_MIXED], sorts: [ORDER_CHRONO], filters: [] }; };
     source.getChannelContents = function (u, type, order, filters) {
         try {
-            if (isJuanitaUrl(u)) return juanitaShowContents(u);
+            var x = parseAny(u);
+            if (x && x.origin == "juanita") return juanitaShowContents(u);
             return channelContents(u);
         } catch (e) { return new VideoPager([], false, {}); }
     };
 
     source.isContentDetailsUrl = function (u) {
-        return /^pelishub:\/\/(?:movie\/\d+|tv\/\d+\/\d+\/\d+)$/.test(String(u || "")) || isJkUrl(u) || isJuanitaUrl(u);
+        var x = parseAny(u);
+        if (!x) return false;
+        if (x.origin == "tmdb") return x.p.kind == "movie" || x.p.kind == "tv";
+        return x.origin == "jk" || x.origin == "juanita";
     };
     source.getContentDetails = function (u) {
         try {
-            if (isJkUrl(u)) return jkDetails(u);
-            if (isJuanitaUrl(u)) return juanitaDetails(u);
+            var x = parseAny(u);
+            if (!x) return errorDetails(u, "URL desconocida");
+            if (x.origin == "jk") return jkDetails(u);
+            if (x.origin == "juanita") return juanitaDetails(u);
             return details(u);
         } catch (e) { log("DETAIL " + e); return errorDetails(u, String(e)); }
     };
     source.getContentRecommendations = function (u) {
         try {
-            if (isJkUrl(u)) return new VideoPager(jkRecommendations(u), false, {});
-            if (isJuanitaUrl(u)) return new VideoPager(juanitaRecommendations(u), false, {});
+            var x = parseAny(u);
+            if (x && x.origin == "jk") return new VideoPager(jkRecommendations(u), false, {});
+            if (x && x.origin == "juanita") return new VideoPager(juanitaRecommendations(u), false, {});
             return new VideoPager(recommendations(u), false, {});
         } catch (e) { return new VideoPager([], false, {}); }
     };
