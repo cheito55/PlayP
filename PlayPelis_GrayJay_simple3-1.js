@@ -475,7 +475,8 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
     "vimeos", "vidhide", "callistanise", "hgcloud.", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream.",
-    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com", "playspelis.com", "321moviesfree.com", "flixlat.com"];
+    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com", "playspelis.com", "321moviesfree.com", "flixlat.com",
+    "hglink.to", "morencius.com", "acek-cdn.com", "futuretravelroute.space"];
 /* 1fichier.com es un portal de descarga directa (cyberlocker) con captcha/espera,
    no un embed de video con m3u8/mp4 -> no vale la pena gastar tiempo/requests en
    intentarlo, se descarta antes de llegar al extractor generico. */
@@ -576,35 +577,62 @@ function voeFromHtml(h, pageUrl, label) {
  * la pagina estan escritas con tokens en base36 que hay que reemplazar
  * por las palabras de ese array. Portado de PlPro.js (vidhideExtract). */
 function exVidhide(url, label, ref) {
-    var u = String(url || "");
+    /* Vidhide / callistanise / morencius / hglink (packer Dean Edwards → acek-cdn m3u8) */
+    var u = String(url || ""), out = [], base, html, i, best = "", m, txt;
     if (u.indexOf("vidhidefast.com") >= 0) u = u.replace("vidhidefast.com", "callistanise.com");
     else if (u.indexOf("vidhide.com") >= 0 && u.indexOf("callistanise") < 0) u = u.replace("vidhide.com", "callistanise.com");
-    var base = "https://" + hostOf(u) + "/", html = httpGet(u, ref || base);
-    if (!html || html.length < 500) { log("    vidhide: html insuficiente (" + (html ? html.length : 0) + ")"); return []; }
-    var splitIdx = html.lastIndexOf(".split('|')");
-    if (splitIdx < 0) { log("    vidhide: no se encontr\u00f3 .split('|')"); return []; }
-    var keyEnd = html.lastIndexOf("'", splitIdx), keyStart = html.lastIndexOf("'", keyEnd - 1) + 1;
-    var keyArr = html.substring(keyStart, keyEnd).split("|");
-    if (keyArr.length < 50) { log("    vidhide: array de claves corto (" + keyArr.length + ")"); return []; }
-    function decode(s) {
-        return s.replace(/[a-z0-9]+/g, function (tok) {
-            var v = parseInt(tok, 36);
-            return (!isNaN(v) && v > 0 && v < keyArr.length && keyArr[v] && keyArr[v].length > 1) ? keyArr[v] : tok;
-        });
+    base = "https://" + hostOf(u) + "/";
+    html = httpGet(u, ref || base);
+    if (!html || html.length < 200) {
+        log("    vidhide: html insuficiente (" + (html ? html.length : 0) + ") " + hostOf(u));
+        return out;
     }
-    var cands = html.match(/["'][a-z0-9]+:\/\/[^"']+["']/gi) || [], out = [], i, best = "";
-    for (i = 0; i < cands.length; i++) {
-        var dec = cleanUrl(decode(cands[i].substring(1, cands[i].length - 1)));
-        if (dec.indexOf("master.") >= 0 && dec.indexOf(".m3u8") >= 0) { best = dec; break; }
-        if (!best && dec.indexOf("master.") >= 0 && dec.indexOf(".txt") >= 0) best = dec;
+    /* 1) Desempaquetar P.A.C.K.E.R. (morencius y clones) */
+    var un = unpackAll(html);
+    for (i = 0; i < un.length; i++) {
+        m = /https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/i.exec(un[i]);
+        if (m) { best = cleanUrl(m[0]); break; }
+        m = /https?:\/\/[^\s"'<>\\]+master\.[^\s"'<>\\]+/i.exec(un[i]);
+        if (m && !best) best = cleanUrl(m[0]);
     }
-    if (!best) { log("    vidhide: sin master.m3u8/.txt entre " + cands.length + " candidatos"); return []; }
+    /* 2) Metodo clasico vidhide: array | + tokens base36 */
+    if (!best) {
+        var splitIdx = html.lastIndexOf(".split('|')");
+        if (splitIdx >= 0) {
+            var keyEnd = html.lastIndexOf("'", splitIdx), keyStart = html.lastIndexOf("'", keyEnd - 1) + 1;
+            var keyArr = html.substring(keyStart, keyEnd).split("|");
+            if (keyArr.length >= 50) {
+                function decode(s) {
+                    return s.replace(/[a-z0-9]+/g, function (tok) {
+                        var v = parseInt(tok, 36);
+                        return (!isNaN(v) && v > 0 && v < keyArr.length && keyArr[v] && keyArr[v].length > 1) ? keyArr[v] : tok;
+                    });
+                }
+                var cands = html.match(/["'][a-z0-9]+:\/\/[^"']+["']/gi) || [];
+                for (i = 0; i < cands.length; i++) {
+                    var dec = cleanUrl(decode(cands[i].substring(1, cands[i].length - 1)));
+                    if (dec.indexOf("master.") >= 0 && dec.indexOf(".m3u8") >= 0) { best = dec; break; }
+                    if (!best && dec.indexOf("master.") >= 0 && dec.indexOf(".txt") >= 0) best = dec;
+                }
+            }
+        }
+    }
+    /* 3) scanMedia directo sobre el HTML */
+    if (!best) {
+        var scanned = scanMedia(html, label, base, u);
+        if (scanned.length) return scanned;
+    }
+    if (!best) {
+        log("    vidhide/morencius: sin m3u8 en " + hostOf(u));
+        return out;
+    }
     if (/\.txt(?:[?#]|$)/i.test(best)) {
-        var txt = httpGet(best, base), m = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i.exec(txt || "");
+        txt = httpGet(best, base);
+        m = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i.exec(txt || "");
         best = m ? cleanUrl(m[0]) : "";
     }
-    if (best) addSrc(out, mkSrc(best, label, base, "hls"));
-    log("    vidhide: " + (out.length ? "ok" : "no se pudo convertir la fuente"));
+    if (best) addSrc(out, mkSrc(best, label || "Vidhide", base, "hls"));
+    log("    vidhide: " + (out.length ? "ok " + String(best).substring(0, 80) : "fallo"));
     return out;
 }
 
@@ -918,11 +946,15 @@ function resolveEmbed(url, label, ref, depth) {
         d = mkSrc(url, label, ref);
         if (d) return [d];
         if (hostMatches(h, UNSUPPORTED)) { log("  sin soporte: " + h); return []; }
-        if (h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 || h.indexOf("hgcloud.") >= 0 ||
+        /* morencius / hglink / hgcloud = familia vidhide (packer → acek-cdn m3u8) */
+        if (h.indexOf("morencius") >= 0 || h.indexOf("hglink") >= 0 || h.indexOf("hgcloud") >= 0 ||
+            h.indexOf("vidhide") >= 0 || h.indexOf("callistanise") >= 0 ||
             h.indexOf("filelions") >= 0 || h.indexOf("lulustream") >= 0 || h.indexOf("luluvdo") >= 0) {
-            return exVidhide(url, label, ref);
+            var vh = exVidhide(url, label, ref);
+            if (vh && vh.length) return vh;
+            return exGeneric(url, label, ref, depth);
         }
-        if (h.indexOf("voe.") >= 0) return exVoe(url, label, ref);
+        if (h.indexOf("voe.") >= 0 || h.indexOf("voe.sx") >= 0) return exVoe(url, label, ref);
         if (/(?:^|\.)(?:vk\.com|vkvideo\.ru|vk\.ru)$/.test(h)) return exVk(url, label, ref);
         if (h.indexOf("vimeo.com") >= 0) return exVimeo(url, label, ref);
         if (h.indexOf("uqload.") >= 0) return exUqload(url, label);
