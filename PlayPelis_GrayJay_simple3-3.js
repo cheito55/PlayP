@@ -3,17 +3,15 @@
  *
  * Unifica lo aprendido de PlayPelis, EpixPlay y FilmPlus:
  *  - Catalogo: TMDB (Home / Busqueda no dependen de webs externas).
- *  - Fuentes por TMDB (sin buscar por titulo en la web):
- *      PoseidonHD2  -> /_next/data/{buildId}/es/pelicula|{serie}/{tmdbId}/...json  (indexacion nativa por TMDB ID)
- *      PelisJuanita  -> movieInfo.php?title=<slug>  /  serieInfo.php?nombreSerie=<slug>&nroTemporada=&nroEpisodio=
- *      Cuevana3.eu   -> /ver-pelicula/<slug>  /  /episodio/<slug>-temporada-S-episodio-E  (+ busqueda como plan B)
- *  - Fuentes por busqueda en sitios WordPress/DooPlay/Toroflix (dominios de FilmPlus y PlayPelis):
- *      pelisplushd, pelishouse, cinetux, pelispedia, pelisxd, allpeliculas, repelis, rexpelis, ...
- *  - Extractores de embeds: voe, uqload, streamtape, dood, plusvip, esplay, fastream, ok.ru,
- *    y un extractor generico con desempaquetador P.A.C.K.E.R. (streamwish, filemoon, mixdrop, supervideo, vidhide...).
- *  - Series: cada serie tiene un "canal" con sus temporadas/episodios.
+ *  - Fuentes (solo 3, optimizado por velocidad):
+ *      PoseidonHD2  -> JSON Next.js por TMDB ID (mas rapido, sin scrapear titulo)
+ *      PelisJuanita -> movieInfo/serieInfo + buscador propio
+ *      Cuevana3     -> slug / busqueda
+ *  - Extractores: voe, uqload, streamtape, dood, streamwish, vidhide, filemoon, etc.
+ *  - Series: canal TMDB con temporadas/episodios.
+ *  - Early-stop: WANT_SERVERS corta al tener N fuentes reproducibles.
  *
- * Todo lo que se prueba/resuelve queda anotado en la descripcion (=== DEBUG ===).
+ * Debug: debugMode en settings -> bloque === DEBUG === en la descripcion.
  */
 
 var PLATFORM = "PelisHub";
@@ -31,10 +29,9 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 
 var MAX_ITEMS = 60;
 var MAX_HTML = 2500000;
-var MAX_CAND = 8;          /* embeds a resolver por proveedor */
-var WANT_SERVERS = 12;     /* agregador: conservar varias fuentes reproducibles */
-var BUDGET_MS = 45000;     /* tiempo maximo por pelicula/episodio */
-var FAST_STOP_ON_SOURCE = false; /* el indexador agrega todos los proveedores; nunca se corta por la primera fuente */
+var MAX_CAND = 4;          /* embeds a resolver por proveedor (menos = mas rapido) */
+var WANT_SERVERS = 2;      /* cortar cuando ya hay N fuentes reproducibles (Poseidon suele bastar con 1-2) */
+var BUDGET_MS = 35000;     /* tiempo maximo por pelicula/episodio */
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -54,12 +51,6 @@ function budgetLeft() { return Date.now() < _deadline; }
 function startBudget() { _deadline = Date.now() + BUDGET_MS; }
 function extraSites() { var v = _settings && _settings.extraSites; return v === true || v === "true" || v === 1 || v === "1"; }
 function debugMode() { var v = _settings && _settings.debugMode; return v === true || v === "true" || v === 1 || v === "1"; }
-
-/* Motor de indexacion central: TMDB/IMDb identifica el contenido; los sitios solo
- * actuan como indexadores de embeds. No existe una prioridad fija de proveedor. */
-var INDEX_MAX_PROVIDERS = 14;
-var INDEX_MAX_QUERIES = 3;
-var INDEX_PARALLEL = true;
 
 /* ------------------------------------------------------------------ */
 /* utilidades de texto                                                 */
@@ -505,10 +496,6 @@ function voeDecodeWith(enc, lut) {
     for (i = 0; i < s.length; i++) u += String.fromCharCode(s.charCodeAt(i) - 3);
     return parseJson(b64decode(reverseStr(u)));
 }
-/* ------------------------------------------------------------------ */
-/* Extractores Optimizados (HLS/MP4 + Calidades + Headers Cast)       */
-/* ------------------------------------------------------------------ */
-
 function srcsFromVoeJson(o, label, ref) {
     var out = [], k, v;
     if (!o) return out;
@@ -516,136 +503,10 @@ function srcsFromVoeJson(o, label, ref) {
         if (!o.hasOwnProperty(k)) continue;
         v = o[k];
         if (typeof v != "string" || !/^https?:\/\//i.test(v)) continue;
-        
-        // Detección automática de calidad según la llave (ej. "1080p") o la URL
-        var q = fastQualityFromText(k + " " + v);
-        var qLabel = q ? label + " " + q + "p" : label;
-        
-        if (/direct_access|mp4/i.test(k) || /\.mp4(?:[?#]|$)/i.test(v)) {
-            addSrc(out, mkFastSrc(v, qLabel, ref, "mp4", q));
-        } else if (/^(?:source|hls|file|url|src)$/i.test(k)) {
-            addSrc(out, mkFastSrc(v, qLabel + " HLS", ref, "hls", q));
-        }
-    }
-    
-    // Ordenar de mayor a menor calidad
-    out.sort(function(a, b) {
-        var qa = fastQualityFromText(a.name) || 0;
-        var qb = fastQualityFromText(b.name) || 0;
-        return qb - qa;
-    });
-    
-    return out;
-}
-
-function voeFromHtml(h, pageUrl, label) {
-    var out = [], m = /json">\s*\[\s*"([^"]+)"\s*\]\s*<\/script>\s*(?:<script[^>]+src="([^"]+)")?/i.exec(h || ""), ref = originOf(pageUrl) + "/", luts = [], i;
-    if (!m) return scanMedia(h, label, ref, pageUrl);
-    if (m[2]) {
-        var js = httpGet(absUrl(m[2], pageUrl), pageUrl), lm = /(\[(?:'\W{2}'[,\]]){1,9})/.exec(js || "");
-        if (lm) { var arr = lm[1].slice(2, -2).split("','"); if (arr.length) luts.push(arr); }
-    }
-    luts.push(VOE_LUT);
-    for (i = 0; i < luts.length; i++) {
-        var o = null;
-        try { o = voeDecodeWith(m[1], luts[i]); } catch (e) {}
-        if (o) {
-            out = srcsFromVoeJson(o, label, ref);
-            if (out.length) return out;
-        }
+        if (/direct_access|mp4/i.test(k) || /\.mp4(?:[?#]|$)/i.test(v)) addSrc(out, mkSrc(v, label + " MP4", ref, "mp4"));
+        else if (/^(?:source|hls|file|url|src)$/i.test(k)) addSrc(out, mkSrc(v, label, ref, "hls"));
     }
     return out;
-}
-
-function exVoe(url, label, ref) {
-    var h = httpGet(url, ref), tries = 0, m, cur = url;
-    while (h && tries < 3) {
-        var out = voeFromHtml(h, cur, label);
-        if (out.length) return out;
-        m = /(?:window\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]/i.exec(h);
-        if (!m || /^(?:#|javascript)/i.test(m[1])) break;
-        cur = absUrl(m[1], cur);
-        h = httpGet(cur, url);
-        tries++;
-    }
-    return [];
-}
-
-function exVidhide(url, label, ref) {
-    var u = String(url || "");
-    if (u.indexOf("vidhidefast.com") >= 0) u = u.replace("vidhidefast.com", "callistanise.com");
-    else if (u.indexOf("vidhide.com") >= 0 && u.indexOf("callistanise") < 0) u = u.replace("vidhide.com", "callistanise.com");
-    
-    var base = "https://" + hostOf(u) + "/";
-    var html = httpGet(u, ref || base);
-    if (!html || html.length < 500) return [];
-    
-    var splitIdx = html.lastIndexOf(".split('|')");
-    if (splitIdx < 0) return [];
-    var keyEnd = html.lastIndexOf("'", splitIdx), keyStart = html.lastIndexOf("'", keyEnd - 1) + 1;
-    var keyArr = html.substring(keyStart, keyEnd).split("|");
-    if (keyArr.length < 50) return [];
-    
-    function decode(s) {
-        return s.replace(/[a-z0-9]+/g, function (tok) {
-            var v = parseInt(tok, 36);
-            return (!isNaN(v) && v > 0 && v < keyArr.length && keyArr[v] && keyArr[v].length > 1) ? keyArr[v] : tok;
-        });
-    }
-    
-    var cands = html.match(/["'][a-z0-9]+:\/\/[^"']+["']/gi) || [], out = [], i, best = "";
-    for (i = 0; i < cands.length; i++) {
-        var decStr = cleanUrl(decode(cands[i].substring(1, cands[i].length - 1)));
-        if (decStr.indexOf("master.") >= 0 && decStr.indexOf(".m3u8") >= 0) { best = decStr; break; }
-        if (!best && decStr.indexOf("master.") >= 0 && decStr.indexOf(".txt") >= 0) best = decStr;
-    }
-    
-    if (!best) return [];
-    if (/\.txt(?:[?#]|$)/i.test(best)) {
-        var txt = httpGet(best, base), m = /https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i.exec(txt || "");
-        best = m ? cleanUrl(m[0]) : "";
-    }
-    
-    // mkFastSrc inyecta automáticamente Origin y Referer usando "base"
-    if (best) addSrc(out, mkFastSrc(best, label + " HLS", base, "hls"));
-    return out;
-}
-
-function exUqload(url, label) {
-    var u = String(url || ""); if (u.indexOf(".html") < 0) u += ".html";
-    var R = "https://uqload.com/";
-    var h = httpGet(u, url), m = /sources\s*:\s*\[([^\]]+)\]/i.exec(h || ""), out = [], parts, i;
-    if (!m) return out;
-    
-    parts = m[1].replace(/\\"/g, "").replace(/"/g, "").split(",");
-    for (i = 0; i < parts.length; i++) {
-        var srcUrl = clean(parts[i]);
-        if (!srcUrl) continue;
-        
-        // Uqload suele incluir resoluciones en los nombres de archivo
-        var q = fastQualityFromText(srcUrl);
-        var qLabel = q ? label + " " + q + "p" : label;
-        
-        addSrc(out, mkFastSrc(srcUrl, qLabel, R, "mp4", q));
-    }
-    
-    out.sort(function(a, b) {
-        var qa = fastQualityFromText(a.name) || 0;
-        var qb = fastQualityFromText(b.name) || 0;
-        return qb - qa;
-    });
-    
-    return out;
-}
-
-function exStreamTape(url, label) {
-    var R = "https://streamtape.com/";
-    var h = httpGet(url, url), m = /robotlink'\)\.innerHTML\s*=\s*'(.+?)'\s*\+\s*\('(.+?)'\)/i.exec(h || "");
-    if (!m) return [];
-    
-    var finalUrl = "https:" + m[1] + m[2].substring(3);
-    var s = mkFastSrc(finalUrl, label, R, "mp4");
-    return s ? [s] : [];
 }
 function voeFromHtml(h, pageUrl, label) {
     var out = [], m = /json">\s*\[\s*"([^"]+)"\s*\]\s*<\/script>\s*(?:<script[^>]+src="([^"]+)")?/i.exec(h || ""), ref = originOf(pageUrl) + "/", luts = [], i;
@@ -789,77 +650,37 @@ var OK_RANK = { "ultra": 7, "quad": 6, "full": 5, "hd": 4, "sd": 3, "low": 2, "l
 var OK_LABEL = { "ultra": "2160p", "quad": "1440p", "full": "1080p", "hd": "720p", "sd": "480p", "low": "360p", "lowest": "240p", "mobile": "144p" };
 function exOkRu(url, label, ref) {
     var id = (String(url).match(/(?:videoembed|video|live)\/(\d+)/) || String(url).match(/[?&](?:id|mid)=(\d+)/) || [])[1];
-    if (!id) return [];
-
-    var R = "https://ok.ru/";
-    var out = [];
-    
-    // 1. Prioriza videoembed para lectura rápida, con fallback a video normal
-    var h = httpGet("https://ok.ru/videoembed/" + id, R);
+    if (!id) { log("    ok.ru: sin id en " + url.substring(0, 80)); return []; }
+    var R = "https://ok.ru/", out = [], h = httpGet("https://ok.ru/videoembed/" + id, R);
     if (!h) h = httpGet("https://ok.ru/video/" + id, R);
     if (!h) return out;
-
-    var meta = null;
-    
-    // 2. Extracción directa desde data-options sin recorrer el DOM entero
-    var m = /data-options\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(h);
+    var m = /data-options=(?:"([^"]*)"|'([^']*)')/i.exec(h), meta = null, o, fv;
     if (m) {
-        var raw = htmlUnescape(m[1] != null ? m[1] : m[2]);
-        var o = parseJson(raw);
-        var fv = o && o.flashvars;
+        o = parseJson(htmlUnescape(m[1] != null ? m[1] : m[2]));
+        fv = o && o.flashvars;
         if (fv) {
             meta = fv.metadata;
             if (typeof meta == "string") meta = parseJson(meta);
-            
-            // Si la metadata no viene inline, se pide a su URL dedicada
-            if (!meta && (fv.metadataUrl || fv.metadataURL)) {
-                var mu = fv.metadataUrl || fv.metadataURL;
+            if (!meta && fv.metadataUrl) {
+                var mu = fv.metadataUrl;
                 meta = parseJson(httpGet(mu, R)) || parseJson(httpPost(mu, "", R));
             }
         }
     }
-
-    // 3. Plan B: Buscar hlsManifestUrl crudo en el HTML si falla data-options
     if (!meta) {
-        var t = htmlUnescape(h).replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\"/g, '"');
-        var mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(t);
-        if (mm) addSrc(out, mkFastSrc(mm[1], label + " HLS", R, "hls"));
+        /* plan B: buscar las claves directo en el texto */
+        var t = htmlUnescape(h).replace(/\\\\u0026/g, "&").replace(/\\u0026/g, "&").replace(/\\\\\//g, "/").replace(/\\\//g, "/").replace(/\\"/g, '"'), mm = /"hlsManifestUrl"\s*:\s*"([^"]+)"/i.exec(t);
+        if (mm) addSrc(out, mkSrc(mm[1], label + " HLS", R, "hls"));
+        log("    ok.ru: sin metadata (data-options " + (m ? "presente" : "ausente") + ") plan B -> " + out.length);
         return out;
     }
-
-    // 4. Extracción HLS directo 
     var hls = meta.hlsManifestUrl || meta.hlsMasterPlaylistUrl || meta.ondemandHls || "";
-    if (hls) {
-        addSrc(out, mkFastSrc(hls, label + " HLS", R, "hls"));
-    }
-
-    // 5. Mapeo estricto de calidades Ok.ru para ordenar MP4
-    var QUALITY_RANK = {
-        "ultra": 2160, "quad": 1440, "full": 1080, "fullhd": 1080,
-        "hd": 720, "hdp": 720, "sd": 480, "sdp": 480,
-        "low": 360, "lq": 360, "lowest": 240, "mobile": 144
-    };
-
-    var vids = Array.isArray(meta.videos) ? meta.videos.slice(0) : [];
-    
-    // Ordenar videos de mayor a menor calidad antes de agregarlos
-    vids.sort(function(a, b) {
-        var qA = QUALITY_RANK[String(a.name || "").toLowerCase()] || 0;
-        var qB = QUALITY_RANK[String(b.name || "").toLowerCase()] || 0;
-        return qB - qA;
-    });
-
-    for (var i = 0; i < vids.length; i++) {
-        if (vids[i] && vids[i].url) {
-            var vName = String(vids[i].name || "").toLowerCase();
-            var q = QUALITY_RANK[vName] || fastQualityFromText(vids[i].url);
-            var qLabel = q ? q + "p" : (vids[i].name || "MP4");
-            
-            // mkFastSrc se encarga automáticamente de inyectar el Referer y Origin basado en "R"
-            addSrc(out, mkFastSrc(vids[i].url, label + " " + qLabel, R, "mp4", q));
-        }
-    }
-
+    if (hls) addSrc(out, mkSrc(hls, label + " HLS", R, "hls"));
+    var vids = (meta.videos || []).slice(0);
+    vids.sort(function (a, b) { return (OK_RANK[b.name] || 0) - (OK_RANK[a.name] || 0); });
+    var i;
+    for (i = 0; i < vids.length; i++) if (vids[i].url) addSrc(out, mkSrc(vids[i].url, label + " " + (OK_LABEL[vids[i].name] || vids[i].name || "MP4"), R, "mp4"));
+    log("    ok.ru: hls=" + (hls ? "si" : "no") + " mp4=" + vids.length + (meta.error ? " error=" + meta.error : ""));
     return out;
 }
 
@@ -961,67 +782,37 @@ function exGeneric(url, label, ref, depth) {
     return out;
 }
 
-/* Hosts que suelen cambiar entre plantillas pero siguen exponiendo el video
- * mediante HTML/JS empaquetado. Un extractor comun evita mantener un extractor
- * distinto por cada dominio espejo. */
-function exPackedHost(url, label, ref, depth) {
-    var h = hostOf(url), page = httpGet(url, ref || (originOf(url) + "/")), out = [];
-    if (!page) return out;
-    out = scanMedia(page, label, ref || url, url);
-    if (out.length) return out;
-    var unpacked = unpackAll(page), i;
-    for (i = 0; i < unpacked.length; i++) {
-        out = out.concat(scanMedia(unpacked[i], label, ref || url, url));
-        if (out.length >= 8) break;
-    }
-    if (!out.length && depth < 2) {
-        var links = discoverLinks(page, url);
-        for (i = 0; i < links.length && i < 6; i++) {
-            var more = resolveEmbed(links[i], label, url, (depth || 0) + 1), j;
-            for (j = 0; j < more.length; j++) addSrc(out, more[j]);
-            if (out.length >= 8) break;
-        }
-    }
-    log("    packed-host " + h + " -> " + out.length);
-    return out;
-}
-
-/* Poseidon player.php envuelve el cyberlocker real (streamwish, vidhide, dood…).
-   El HTML trae el enlace final en texto plano; lo sacamos y resolvemos directo. */
+/* punto de entrada para cualquier URL de embed */
+/* Poseidon player.php: el HTML trae el cyberlocker real (streamwish, vidhide…) */
 function exPoseidonPlayer(url, label, ref) {
-    var html = httpGet(url, ref || "https://www.poseidonhd2.co/"), out = [], links, i, more, j;
+    var html = httpGet(url, ref || "https://www.poseidonhd2.co/"), out = [], links = [], i, j, more, m, re;
     if (!html) return out;
-    /* enlaces de hosts conocidos en el HTML del player */
-    links = [];
-    var re = /https?:\/\/[^\s"'<>\\]+/gi, m;
+    re = /https?:\/\/[^\s"'<>\\]+/gi;
     while ((m = re.exec(html)) != null) {
         var u = cleanUrl(m[0]);
         if (!u || u === url) continue;
         if (hostMatches(hostOf(u), UNSUPPORTED)) continue;
-        if (isServerUrl(u) || /\/e\/[a-z0-9]+/i.test(u) || /\/d\/[a-z0-9]+/i.test(u) || /embed/i.test(u)) {
+        if (isServerUrl(u) || /\/e\/[a-z0-9]+/i.test(u) || /\/d\/[a-z0-9]+/i.test(u)) {
             if (links.indexOf(u) < 0) links.push(u);
         }
-        if (links.length >= 8) break;
+        if (links.length >= 6) break;
     }
-    /* también iframes / redirects genéricos */
     var disc = discoverLinks(html, url);
     for (i = 0; i < disc.length; i++) if (links.indexOf(disc[i]) < 0) links.push(disc[i]);
-    for (i = 0; i < links.length && budgetLeft() && out.length < 6; i++) {
+    for (i = 0; i < links.length && budgetLeft() && out.length < 4; i++) {
         more = resolveEmbed(links[i], label, url, 1);
         for (j = 0; j < more.length; j++) addSrc(out, more[j]);
     }
     if (!out.length) out = scanMedia(html, label, url, url);
-    log("    poseidon-player -> " + out.length + " (links=" + links.length + ")");
+    log("    poseidon-player -> " + out.length);
     return out;
 }
 
-/* punto de entrada para cualquier URL de embed */
 function resolveEmbed(url, label, ref, depth) {
     depth = depth || 0;
     url = cleanUrl(url);
     if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
     var h = hostOf(url), d;
-    /* player.poseidonhd2.co / download.php: resolver al cyberlocker real */
     if (/player\.poseidonhd2\.co$/i.test(h) || (/poseidonhd2\.co$/i.test(h) && /\/(?:player|download)\.php/i.test(url))) {
         return exPoseidonPlayer(url, label, ref);
     }
@@ -1050,9 +841,6 @@ function resolveEmbed(url, label, ref, depth) {
     if (h.indexOf("esplay.") >= 0) return exEsplay(url, label);
     if (h.indexOf("fastream.") >= 0) return exFastream(url, label);
     if (h == "ok.ru" || h.indexOf(".ok.ru") >= 0 || h.indexOf("odnoklassniki") >= 0) return exOkRu(url, label, ref);
-    if (/streamwish|filemoon|mixdrop|supervideo|filelions|xupalace|nuuuppp|playhubconnect|saidochesto|streamhub|embedwish|dhcplay|minochinos|lulustream|luluvdo|vtube|vidguard|bigwarp|goodstream|mycdn\.moe|acek-cdn\.com|dramiyos-cdn\.com|solo-latino\.com/i.test(h)) {
-        return exPackedHost(url, label, ref, depth);
-    }
     if (h.indexOf("vimeus.") >= 0) {
         /* "vimeus.com" NO es Vimeo real (vimeo.com) - la pagina se arma con
            JS del lado del cliente, asi que no tiene sentido tratarlo como Vimeo.
@@ -1113,14 +901,6 @@ function findLinks(html, base, kind) {
     for (var i = 0; i < out.length; i++) out[i].titles.push(slugWords(out[i].url));
     return out;
 }
-/* NOTA: la vieja "Red WordPress / DooPlay (Cascada Nativa)" (DOOPLAY_SITES +
-   provDooPlayNetwork) se elimino: adivinaba la URL del slug en vez de buscar por
-   titulo y exigia el string literal "admin-ajax.php" en el HTML crudo para aceptar
-   un match, asi que fallaba en casi todos los titulos y la cascada terminaba
-   saltando directo a Cuevana3. Ahora collectSources() recorre SITES (PoseidonHD
-   primero) con provSite(), que busca por titulo via el buscador de cada sitio
-   (/?s=) y puntua los resultados con pickBest antes de aceptar un match. */
-
 /* score de un link candidato contra el contexto (ctx.titles = variantes normalizadas
    del titulo real, alimentadas con TMDB es/en/original + AKAs -ver tmdbTitleVariants-).
    Combina: (a) coincidencia fuerte por substring/igualdad (como antes) y (b) similitud
@@ -1184,11 +964,7 @@ function resolveCands(cands, out, prov) {
         if (!k || seen[k]) continue;
         seen[k] = 1; list.push(c);
     }
-    list.sort(function (a, b) {
-        var ia = a.identity || 0, ib = b.identity || 0;
-        if (ia != ib) return ib - ia;
-        return langRank(a.lang) - langRank(b.lang);
-    });
+    list.sort(function (a, b) { return langRank(a.lang) - langRank(b.lang); });
     /* adelantar en paralelo las paginas de los primeros candidatos (los que de
        verdad se van a intentar, ver MAX_CAND) en vez de pedirlas una por una a
        medida que el loop de abajo las necesita: es la optimizacion de velocidad
@@ -1198,7 +974,7 @@ function resolveCands(cands, out, prov) {
     for (i = 0; i < pn; i++) { if (list[i].url) pre.push(list[i].url); }
     prefetchUrls(pre);
     var n = 0, good = 0;
-    for (i = 0; i < list.length && n < MAX_CAND * 2 && budgetLeft(); i++) {
+    for (i = 0; i < list.length && n < MAX_CAND && budgetLeft(); i++) {
         c = list[i];
         var label = (c.lang ? c.lang + " \u00b7 " : "") + prov + " \u00b7 " + (c.url ? prettyHost(c.url) : "directo"), got = [], j;
         if (c.srcs) {
@@ -1219,39 +995,223 @@ function resolveCands(cands, out, prov) {
     }
     return good;
 }
+
 /* ------------------------------------------------------------------ */
-/* PelisJuanita: indexador directo                                     */
 /* ------------------------------------------------------------------ */
-function pelisJuanitaUrls(ctx) {
-    var base = "https://pelisjuanita.com", out = [], qs = uniq([ctx.titleEs, ctx.titleEn, ctx.titleOrig].concat(ctx.altTitles || [])), i, slug;
-    for (i = 0; i < qs.length && out.length < INDEX_MAX_QUERIES; i++) {
-        slug = slugJuanita(qs[i]);
-        if (!slug) continue;
-        if (ctx.kind == "movie") out.push(base + "/movieInfo.php?title=" + enc(slug));
-        else out.push(base + "/serieInfo.php?nombreSerie=" + enc(slug) + "&nroTemporada=" + enc(ctx.season) + "&nroEpisodio=" + enc(ctx.episode));
+/* PoseidonHD2 — JSON por TMDB ID (rapido, sin scrapear titulo)         */
+/* ------------------------------------------------------------------ */
+
+var _poseidonBuildId = "";
+var _poseidonBuildAt = 0;
+var POSEIDON_BASE = "https://www.poseidonhd2.co";
+var POSEIDON_BUILD_TTL = 30 * 60 * 1000;
+
+function poseidonBuildId() {
+    if (_poseidonBuildId && (Date.now() - _poseidonBuildAt) < POSEIDON_BUILD_TTL) return _poseidonBuildId;
+    var html = httpGet(POSEIDON_BASE + "/", POSEIDON_BASE + "/");
+    var m = /"buildId"\s*:\s*"([^"]+)"/.exec(html || "");
+    if (m && m[1]) {
+        _poseidonBuildId = m[1];
+        _poseidonBuildAt = Date.now();
+        log("  Poseidon buildId=" + _poseidonBuildId);
     }
-    return uniq(out);
+    return _poseidonBuildId || "Q-i_R7Z4xGx1ZLVEa6Zzs";
 }
-function provPelisJuanita(ctx) {
-    var urls = pelisJuanitaUrls(ctx), bodies = batchGet(urls, "https://pelisjuanita.com/"), out = [], i, j, parsed, links, direct;
-    for (i = 0; i < bodies.length; i++) {
-        if (!bodies[i]) continue;
-        parsed = parseJson(bodies[i]);
-        links = [];
-        if (parsed) deepUrls(parsed, links, 0);
-        else {
-            /* Algunas respuestas son HTML/JSON embebido. */
-            direct = discoverLinks(bodies[i], urls[i]);
-            for (j = 0; j < direct.length; j++) links.push(direct[j]);
-            direct = scanMedia(bodies[i], "", urls[i], urls[i]);
-            for (j = 0; j < direct.length; j++) { out.push({ url: "", lang: "", ref: urls[i], prov: "PelisJuanita", srcs: [direct[j]] }); }
-        }
-        for (j = 0; j < links.length; j++) {
-            if (/^https?:\/\//i.test(links[j])) out.push(mkCand(links[j], langOf(links[j]), urls[i], "PelisJuanita"));
+
+function poseidonLangLabel(key) {
+    key = String(key || "").toLowerCase();
+    if (key === "latino") return "Latino";
+    if (key === "spanish" || key === "castellano") return "Castellano";
+    if (key === "english" || key === "ingles") return "Ingles";
+    return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : "";
+}
+
+function poseidonExtractVideos(block, ref) {
+    var out = [], langs = ["latino", "spanish", "english"], i, j, list, v, lang;
+    if (!block) return out;
+    var videos = block.videos || {};
+    for (i = 0; i < langs.length; i++) {
+        list = videos[langs[i]] || [];
+        lang = poseidonLangLabel(langs[i]);
+        for (j = 0; j < list.length; j++) {
+            v = list[j];
+            if (!v || !v.result) continue;
+            out.push(mkCand(v.result, lang, ref, "PoseidonHD"));
         }
     }
-    log("  PelisJuanita index -> " + out.length + " candidatos");
     return out;
+}
+
+function poseidonByTmdb(ctx) {
+    if (!ctx || !ctx.id) return [];
+    var bid = poseidonBuildId();
+    if (!bid) return [];
+    var slug = "x", url, body, data, block, out = [];
+
+    if (ctx.kind == "movie") {
+        url = POSEIDON_BASE + "/_next/data/" + bid + "/es/pelicula/" + ctx.id + "/" + slug +
+            ".json?tmdb=" + enc(ctx.id) + "&movie=" + slug;
+        body = httpGet(url, POSEIDON_BASE + "/");
+        data = parseJson(body);
+        if (!data || !data.pageProps) { log("  Poseidon movie JSON vacio tmdb=" + ctx.id); return []; }
+        block = data.pageProps.thisMovie || null;
+        if (!block || String(block.TMDbId || "") !== String(ctx.id)) {
+            log("  Poseidon movie TMDbId no coincide");
+            return [];
+        }
+        out = poseidonExtractVideos(block, POSEIDON_BASE + "/");
+        log("  PoseidonHD JSON movie " + ctx.id + " -> " + out.length);
+        return out;
+    }
+
+    var s = ctx.season || 1, e = ctx.episode || 1;
+    url = POSEIDON_BASE + "/_next/data/" + bid + "/es/serie/" + ctx.id + "/" + slug +
+        "/temporada/" + s + "/episodio/" + e +
+        ".json?tmdb=" + enc(ctx.id) + "&serie=" + slug + "&season=" + s + "&episode=" + e;
+    body = httpGet(url, POSEIDON_BASE + "/");
+    data = parseJson(body);
+    if (!data || !data.pageProps) { log("  Poseidon ep JSON vacio tmdb=" + ctx.id + " S" + s + "E" + e); return []; }
+    block = data.pageProps.episode || null;
+    if (!block) { log("  Poseidon ep sin bloque episode"); return []; }
+    out = poseidonExtractVideos(block, POSEIDON_BASE + "/");
+    log("  PoseidonHD JSON ep " + ctx.id + " S" + s + "E" + e + " -> " + out.length);
+    return out;
+}
+
+function provPoseidon(ctx) {
+    return poseidonByTmdb(ctx);
+}
+
+/* PelisJuanita (por TMDB, sin busqueda)                               */
+/* ------------------------------------------------------------------ */
+
+function parseJuanita(html, base) {
+    /* ANTES se descartaba toda fila con data-tipo distinto de "stream", pero el
+       sitio tambien sirve servidores perfectamente reproducibles (Streamwish, Dood,
+       Goodstream) bajo data-tipo="download" (el modal "DESCARGAS" que se ve en el
+       sitio) -en varios titulos ESE es el unico tipo de fila que existe, y filtrarlo
+       hacia que la busqueda diera "0 fuentes" aunque la web mostrara servidores. Se
+       aceptan ambos tipos; solo se descartan explicitamente los que claramente no
+       son un host de video (torrent/magnet). */
+    var out = [], tags = findTags(html, /row-download/i), i;
+    for (i = 0; i < tags.length; i++) {
+        var a = attrsOf(tags[i].tag);
+        var tipo = (a["data-tipo"] || "").toLowerCase();
+        if (tipo == "torrent" || tipo == "magnet") continue;
+        var u = a["data-url"];
+        if (!u) continue;
+        if (!/^https?:|^\/\//i.test(u)) { var d = b64decode(u); if (/^https?:\/\//i.test(d)) u = d; }
+        var lang = langOf(a["data-idioma"] || "") || langOf(strip(html.substring(tags[i].end, tags[i].end + 250)));
+        out.push(mkCand(absUrl(u, base), lang, base + "/", "Juanita"));
+    }
+    return out;
+}
+/* /movies/search?s=<q> (y /series/search?s=<q>) - buscador propio de PelisJuanita
+   que SI encuentra titulos recientes que el slug adivinado (movieInfo.php?title=)
+   todavia no tiene armado en su lado (ver nota del usuario: "Spider-Man" 2026 no
+   aparecia por slug pero si por este buscador). Se usa SOLO como plan B cuando el
+   slug directo no trajo nada, y el resultado se valida con scoreLink (titulo+año)
+   antes de confiar en el, nunca a ciegas. El formato exacto de la respuesta no esta
+   100% confirmado (Juanita no documenta su API), asi que el parser es tolerante a
+   varios nombres de campo comunes y deja rastro en el debug para poder ajustarlo
+   rapido si hiciera falta. */
+function juanitaSearchCandidates(json, kind) {
+    var arr = null;
+    if (Array.isArray(json)) arr = json;
+    else if (json) arr = json.results || json.data || json.movies || json.series || json.items || null;
+    if (!arr || !arr.length) return [];
+    var out = [], i;
+    for (i = 0; i < arr.length && i < 20; i++) {
+        var x = arr[i];
+        if (!x) continue;
+        var title = x.title || x.name || x.titulo || x.nombre || "";
+        var slug = x.slug || x.url_slug || x.titleSlug || "";
+        var yr = x.year || x.anio || yearOf(x.release_date || x.fecha || "");
+        var tmdbId = x.tmdb_id || x.tmdbId || x.idTmdb || "";
+        if (!slug && title) slug = slugJuanita(title);
+        if (!slug) continue;
+        out.push({ url: "juanita:" + slug, titles: [title, slugWords(slug)], type: kind, year: yr ? String(yr) : "", tmdbId: tmdbId, slug: slug });
+    }
+    return out;
+}
+/* variantes de slug para un titulo dado, con el año pegado PRIMERO (ej. "pinocho-2022"
+   antes que "pinocho"). Esto es clave: el sitio comparte el mismo slug base para
+   remakes/homonimos (Pinocho 1940/2019/2022, Moana/Moana 2 sin el "2" no aplica
+   pero si el caso de peliculas con el mismo nombre en distinto año), y sin esta
+   variante el codigo siempre terminaba pidiendo el slug corto -que en el sitio
+   corresponde a UNA sola pelicula fija- sin importar cual version se habia pedido. */
+function juanitaSlugCandidates(ctx) {
+    var raw = uniq([ctx.titleEn, ctx.titleEs, ctx.titleOrig].concat(ctx.altTitles || [])), out = [], i, s;
+    for (i = 0; i < raw.length; i++) {
+        s = trimDash(slugJuanita(raw[i]));
+        if (!s) continue;
+        if (ctx.year) out.push(s + "-" + ctx.year);
+        out.push(s);
+    }
+    return uniq(out).slice(0, 8);
+}
+function provJuanita(ctx) {
+    var base = "https://pelisjuanita.com", slugs = juanitaSlugCandidates(ctx), urls = [], i;
+    for (i = 0; i < slugs.length; i++) {
+        urls.push(ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + slugs[i]
+            : base + "/series/serieInfo.php?nombreSerie=" + slugs[i] + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode);
+    }
+    /* pagina "ver-serie" (la que da el usuario): puede traer el reproductor con otro
+       marcado, distinto del fragmento AJAX de serieInfo.php */
+    var verSerieIdx = -1;
+    if (ctx.kind == "tv" && slugs.length) { verSerieIdx = urls.length; urls.push(base + "/series/ver-serie/" + slugs[0]); }
+    var bodies = batchGet(urls, base + "/");
+    var hits = [];
+    for (i = 0; i < bodies.length; i++) {
+        if (i == verSerieIdx) continue;
+        var items = parseJuanita(bodies[i], base);
+        if (items.length) hits.push({ slug: slugs[i], items: items });
+    }
+    if (hits.length) {
+        /* de todos los slugs que devolvieron servidores, verificar en paralelo la
+           pagina real (/movies/pelicula/<slug>, confirmada por el usuario) y
+           quedarse con el primero -en orden de prioridad- que confirme titulo/año.
+           Esto es lo que evita el bug de "Pinocho" (distintas versiones sirviendo
+           siempre el mismo contenido porque el slug sin año coincidia con otra
+           pelicula del catalogo del sitio). */
+        var vUrls = [], j;
+        for (j = 0; j < hits.length; j++) vUrls.push(ctx.kind == "movie" ? base + "/movies/pelicula/" + hits[j].slug : base + "/series/ver-serie/" + hits[j].slug);
+        var vBodies = batchGet(vUrls, base + "/");
+        for (j = 0; j < hits.length; j++) {
+            var v = verifyPageTitle(vBodies[j], ctx);
+            if (v.ok === false) { log("  descartado (no coincide t\u00edtulo/a\u00f1o) slug=" + hits[j].slug + (v.pageTitle ? " -> pagina real: '" + v.pageTitle + "'" : "")); continue; }
+            log("  slug OK" + (v.ok === true ? " (verificado: '" + v.pageTitle + "')" : " (no se pudo verificar t\u00edtulo, se usa igual)") + ": " + hits[j].slug);
+            return hits[j].items;
+        }
+        log("  ning\u00fan slug con servidores pas\u00f3 la verificaci\u00f3n de t\u00edtulo/a\u00f1o, se intenta el buscador");
+    }
+    if (verSerieIdx >= 0 && bodies[verSerieIdx]) {
+        var vs = bodies[verSerieIdx], out = [], links = discoverLinks(vs, urls[verSerieIdx]), j;
+        for (j = 0; j < links.length; j++) out.push(mkCand(links[j], "", base + "/", "Juanita"));
+        var direct = scanMedia(vs, "", base + "/", base + "/"), k;
+        for (k = 0; k < direct.length; k++) out.push({ url: "", lang: "", srcs: [direct[k]], prov: "Juanita" });
+        if (out.length) { log("  ver-serie: " + out.length + " candidato(s) (marcado distinto de serieInfo.php)"); return out; }
+    }
+    log("  slugs probados: " + slugs.join(", "));
+    /* plan B: buscador propio (usa las variantes de titulo de TMDB, incluidas AKAs) */
+    if (budgetLeft()) {
+        var qEndpoint = ctx.kind == "movie" ? "/movies/search?s=" : "/series/search?s=";
+        var queries = uniq([ctx.titleEs, ctx.titleEn].concat(ctx.altTitles || [])).slice(0, 3), qi;
+        for (qi = 0; qi < queries.length && budgetLeft(); qi++) {
+            var sj = parseJson(httpGet(base + qEndpoint + enc(queries[qi]), base + "/"));
+            if (!sj) continue;
+            var cands = juanitaSearchCandidates(sj, ctx.kind);
+            log("  buscador Juanita '" + queries[qi] + "' -> " + cands.length + " resultado(s) crudos");
+            var best = pickBest(cands, ctx);
+            if (!best) continue;
+            var finalUrl = ctx.kind == "movie" ? base + "/movies/movieInfo.php?title=" + best.slug
+                : base + "/series/serieInfo.php?nombreSerie=" + best.slug + "&nroTemporada=" + ctx.season + "&nroEpisodio=" + ctx.episode;
+            var fh = httpGet(finalUrl, base + "/"), fi = parseJuanita(fh, base);
+            log("  buscador Juanita: match '" + (best.titles[0] || best.slug) + "' -> slug=" + best.slug + " -> " + fi.length + " candidatos");
+            if (fi.length) return fi;
+        }
+    }
+    return [];
 }
 
 /* ------------------------------------------------------------------ */
@@ -1423,171 +1383,11 @@ var SITES = [
     { id: "historiadelcine", name: "HistoriaDelCine", bases: ["https://online.historiadelcine.es"], search: ["/?s={q}"], mode: "wp", extra: true }
 ];
 
-/* ------------------------------------------------------------------ */
-/* identidad exacta TMDB / IMDb                                       */
-/* ------------------------------------------------------------------ */
-function identityScore(url, ctx) {
-    var u = String(url || ""), sc = 0, m, nums = [], i;
-    if (!u || !ctx) return 0;
-    if (ctx.id) {
-        m = /(?:^|[\/_-])(\d{3,10})(?:[\/_-]|$)/g;
-        while ((m = m.exec(u)) != null) nums.push(m[1]);
-        for (i = 0; i < nums.length; i++) if (String(nums[i]) == String(ctx.id)) { sc = Math.max(sc, 100); break; }
-    }
-    if (ctx.imdbId && u.toLowerCase().indexOf(String(ctx.imdbId).toLowerCase()) >= 0) sc = Math.max(sc, 100);
-    if (ctx.kind == "tv") {
-        var se = /(?:season|temporada|s)(?:[\/_-]?)(\d{1,3})[^0-9]{0,8}(?:episode|episodio|e)(?:[\/_-]?)(\d{1,4})/i.exec(u);
-        if (se && parseInt(se[1],10) == ctx.season && parseInt(se[2],10) == ctx.episode) sc += 25;
-        var sx = /[\/_-](\d{1,3})x(\d{1,4})(?:[\/?#_-]|$)/i.exec(u);
-        if (sx && parseInt(sx[1],10) == ctx.season && parseInt(sx[2],10) == ctx.episode) sc += 25;
-    }
-    return Math.min(sc, 100);
-}
-function verifiedIdentity(url, html, ctx) {
-    var id = identityScore(url, ctx), v = verifyPageTitle(html, ctx);
-    if (id >= 100) return { ok: true, score: 100, reason: "TMDB/IMDb exacto", pageTitle: v.pageTitle || "" };
-    if (v.ok === true) return { ok: true, score: v.cov || 80, reason: "titulo/año", pageTitle: v.pageTitle || "" };
-    if (v.ok === false) return { ok: false, score: 0, reason: "titulo/año incompatible", pageTitle: v.pageTitle || "" };
-    return { ok: null, score: id || 0, reason: id ? "identidad parcial" : "sin identidad verificable", pageTitle: v.pageTitle || "" };
-}
-
-/* ------------------------------------------------------------------ */
-/* PoseidonHD2 — indexación nativa por TMDB ID (JSON Next.js)          */
-/* ------------------------------------------------------------------
- * Endpoints confirmados:
- *   Película:
- *     /_next/data/{buildId}/es/pelicula/{tmdbId}/{slug}.json?tmdb={id}&movie={slug}
- *   Episodio:
- *     /_next/data/{buildId}/es/serie/{tmdbId}/{slug}/temporada/{S}/episodio/{E}.json?...
- * El slug es cosmético (cualquier valor sirve). El buildId cambia en cada deploy
- * y se cachea ~30 min. Los players salen listos en videos.{latino|spanish|english}
- * como https://player.poseidonhd2.co/player.php?h=TOKEN
- * ------------------------------------------------------------------ */
-
-var _poseidonBuildId = "";
-var _poseidonBuildAt = 0;
-var POSEIDON_BASE = "https://www.poseidonhd2.co";
-var POSEIDON_BUILD_TTL = 30 * 60 * 1000; /* 30 min */
-
-function poseidonBuildId() {
-    if (_poseidonBuildId && (Date.now() - _poseidonBuildAt) < POSEIDON_BUILD_TTL) return _poseidonBuildId;
-    var html = httpGet(POSEIDON_BASE + "/", POSEIDON_BASE + "/");
-    var m = /"buildId"\s*:\s*"([^"]+)"/.exec(html || "");
-    if (m && m[1]) {
-        _poseidonBuildId = m[1];
-        _poseidonBuildAt = Date.now();
-        log("  Poseidon buildId=" + _poseidonBuildId);
-    }
-    return _poseidonBuildId || "Q-i_R7Z4xGx1ZLVEa6Zzs";
-}
-
-function poseidonLangLabel(key) {
-    key = String(key || "").toLowerCase();
-    if (key === "latino") return "Latino";
-    if (key === "spanish" || key === "castellano") return "Castellano";
-    if (key === "english" || key === "ingles") return "Ingles";
-    return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : "";
-}
-
-/* Extrae candidatos (player.php / download.php) desde el bloque videos/downloads del JSON */
-function poseidonExtractVideos(block, ref) {
-    var out = [], langs = ["latino", "spanish", "english"], i, j, list, v, lang;
-    if (!block) return out;
-    var videos = block.videos || {};
-    for (i = 0; i < langs.length; i++) {
-        list = videos[langs[i]] || [];
-        lang = poseidonLangLabel(langs[i]);
-        for (j = 0; j < list.length; j++) {
-            v = list[j];
-            if (!v || !v.result) continue;
-            var c = mkCand(v.result, lang, ref, "PoseidonHD");
-            c.identity = 100;
-            out.push(c);
-        }
-    }
-    var dls = block.downloads || [];
-    for (j = 0; j < dls.length; j++) {
-        if (!dls[j] || !dls[j].result) continue;
-        var d = mkCand(dls[j].result, dls[j].language || "", ref, "PoseidonHD");
-        d.identity = 100;
-        out.push(d);
-    }
-    return out;
-}
-
-function poseidonByTmdb(ctx) {
-    if (!ctx || !ctx.id) return [];
-    var bid = poseidonBuildId();
-    if (!bid) return [];
-    var slug = "x"; /* el slug no se valida en el endpoint de datos */
-    var url, body, data, block, out = [];
-
-    if (ctx.kind == "movie") {
-        url = POSEIDON_BASE + "/_next/data/" + bid + "/es/pelicula/" + ctx.id + "/" + slug +
-            ".json?tmdb=" + enc(ctx.id) + "&movie=" + slug;
-        body = httpGet(url, POSEIDON_BASE + "/");
-        data = parseJson(body);
-        if (!data || !data.pageProps) {
-            log("  Poseidon movie JSON vacío (tmdb=" + ctx.id + ")");
-            return [];
-        }
-        block = data.pageProps.thisMovie || data.pageProps.movie || null;
-        if (!block || String(block.TMDbId || "") !== String(ctx.id)) {
-            log("  Poseidon movie TMDbId no coincide o ausente");
-            return [];
-        }
-        out = poseidonExtractVideos(block, POSEIDON_BASE + "/");
-        log("  PoseidonHD TMDB-JSON movie " + ctx.id + " -> " + out.length + " players");
-        return out;
-    }
-
-    /* Serie / episodio */
-    var s = ctx.season || 1, e = ctx.episode || 1;
-    url = POSEIDON_BASE + "/_next/data/" + bid + "/es/serie/" + ctx.id + "/" + slug +
-        "/temporada/" + s + "/episodio/" + e +
-        ".json?tmdb=" + enc(ctx.id) + "&serie=" + slug + "&season=" + s + "&episode=" + e;
-    body = httpGet(url, POSEIDON_BASE + "/");
-    data = parseJson(body);
-    if (!data || !data.pageProps) {
-        log("  Poseidon ep JSON vacío (tmdb=" + ctx.id + " S" + s + "E" + e + ")");
-        return [];
-    }
-    block = data.pageProps.episode || null;
-    if (!block) {
-        log("  Poseidon ep sin bloque episode");
-        return [];
-    }
-    /* Algunos episodios traen TMDbId del show; no forzamos igualdad estricta si hay videos */
-    out = poseidonExtractVideos(block, POSEIDON_BASE + "/");
-    log("  PoseidonHD TMDB-JSON ep " + ctx.id + " S" + s + "E" + e + " -> " + out.length + " players");
-    return out;
-}
-
-/* Fallback HTML por ruta directa (por si el JSON falla o el buildId está desfasado) */
-function poseidonDirectUrls(ctx) {
-    if (!ctx || !ctx.id) return [];
-    var slug = slugCuevana(ctx.titleEs || ctx.titleEn || ctx.titleOrig || "") || "x";
-    var out = [];
-    if (ctx.kind == "movie") {
-        out.push(POSEIDON_BASE + "/pelicula/" + String(ctx.id) + "/" + slug);
-    } else {
-        out.push(POSEIDON_BASE + "/serie/" + String(ctx.id) + "/" + slug +
-            "/temporada/" + (ctx.season || 1) + "/episodio/" + (ctx.episode || 1));
-        out.push(POSEIDON_BASE + "/serie/" + String(ctx.id) + "/" + slug);
-    }
-    return uniq(out);
-}
-
 /* variantes de consulta para buscar en un sitio: titulo es/en + hasta 2 AKAs de
    TMDB, asi un titulo "nombrado distinto" en el sitio (doblaje/region) igual
    aparece en alguna de las busquedas */
 function siteQueries(ctx) {
-    var q = [ctx.titleEs, ctx.titleEn].concat((ctx.altTitles || []).slice(0, 2));
-    /* IMDb y TMDB no sustituyen al título en todos los buscadores, pero algunos
-       indexadores sí los indexan. Se prueban solo como consultas adicionales. */
-    if (ctx.imdbId) q.push(ctx.imdbId);
-    if (ctx.id) q.push(String(ctx.id));
-    return uniq(q).slice(0, 6);
+    return uniq([ctx.titleEs, ctx.titleEn].concat((ctx.altTitles || []).slice(0, 2))).slice(0, 4);
 }
 function siteFind(site, ctx) {
     var qs = siteQueries(ctx), bi, qi, pi;
@@ -1726,38 +1526,6 @@ function pageCandidates(html, pageUrl, base, site, ctx) {
     return cands;
 }
 
-function provPoseidon(ctx) {
-    /* 1) Preferido: JSON Next.js indexado por TMDB ID (sin scraping de título) */
-    var out = poseidonByTmdb(ctx);
-    if (out.length) return out;
-
-    /* 2) Fallback HTML por ruta /pelicula/{id}/... o /serie/{id}/.../temporada/S/episodio/E */
-    var urls = poseidonDirectUrls(ctx), bodies = batchGet(urls, POSEIDON_BASE + "/"), i, j;
-    for (i = 0; i < bodies.length; i++) {
-        if (!bodies[i]) continue;
-        var ver = verifiedIdentity(urls[i], bodies[i], ctx);
-        if (ver.ok === false) { log("  Poseidon HTML descartado: " + ver.pageTitle); continue; }
-        if (ver.ok === true) log("  Poseidon HTML OK: " + ver.reason + (ver.pageTitle ? " -> " + ver.pageTitle : ""));
-        var c = pageCandidates(bodies[i], urls[i], POSEIDON_BASE, { name: "PoseidonHD", mode: "wp" }, ctx);
-        if (!c.length) {
-            var links = discoverLinks(bodies[i], urls[i]);
-            for (j = 0; j < links.length; j++) c.push(mkCand(links[j], langOf(links[j]), urls[i], "PoseidonHD"));
-            var media = scanMedia(bodies[i], "", urls[i], urls[i]);
-            for (j = 0; j < media.length; j++) c.push({ url: "", lang: "", ref: urls[i], prov: "PoseidonHD", srcs: [media[j]] });
-        }
-        for (j = 0; j < c.length; j++) { c[j].prov = "PoseidonHD"; c[j].identity = ver.score || 80; out.push(c[j]); }
-        if (out.length) break;
-    }
-    if (out.length) { log("  Poseidon HTML-direct -> " + out.length + " candidatos"); return out; }
-
-    /* 3) Último recurso: buscador por título del sitio */
-    var site = null, k;
-    for (k = 0; k < SITES.length; k++) if (SITES[k].id == "poseidonhd") { site = SITES[k]; break; }
-    if (!site) return [];
-    log("  Poseidon: fallback buscador por titulo");
-    return provSite(site, ctx);
-}
-
 function provSite(site, ctx) {
     var f = siteFind(site, ctx), pageUrl, html;
     if (!f) { log("  sin resultado"); return []; }
@@ -1826,72 +1594,54 @@ function provPlPro(ctx) {
    vez de esperar su turno -> el "cuello de botella" deja de ser la suma de cada
    request y pasa a ser, aproximadamente, el mas lento de ellos. */
 function prefetchProviders(ctx) {
-    var urls = [], qs = siteQueries(ctx), q0 = qs[0], i;
-    if (q0) {
-        for (i = 0; i < SITES.length && i < 4; i++) { if (SITES[i].extra && !extraSites()) continue; urls.push(SITES[i].bases[0] + SITES[i].search[0].replace("{q}", enc(q0).replace(/%20/g, "+"))); }
+    /* Solo adelantar lo que realmente vamos a usar (3 proveedores). */
+    var urls = [], slug1 = slugCuevana(ctx.titleEs || ctx.titleEn || ""), fam = CUEVANA_FAMILIES[0];
+    if (slug1) {
+        urls.push(ctx.kind == "movie" ? fam.movie(fam.bases[0], slug1) : fam.episode(fam.bases[0], slug1, ctx.season, ctx.episode));
     }
-    var slug1 = slugCuevana(ctx.titleEs), fam = CUEVANA_FAMILIES[0];
-    if (slug1) urls.push(ctx.kind == "movie" ? fam.movie(fam.bases[0], slug1) : fam.episode(fam.bases[0], slug1, ctx.season, ctx.episode));
+    /* Juanita: primera URL de slug directo */
+    var jslug = slugJuanita(ctx.titleEs || ctx.titleEn || "");
+    if (jslug) {
+        if (ctx.kind == "movie") urls.push("https://pelisjuanita.com/movieInfo.php?title=" + enc(jslug));
+        else urls.push("https://pelisjuanita.com/serieInfo.php?nombreSerie=" + enc(jslug) + "&nroTemporada=" + enc(ctx.season) + "&nroEpisodio=" + enc(ctx.episode));
+    }
     prefetchUrls(urls);
 }
 
 function collectSources(ctx) {
-    var out = [], providers = [], i;
+    /* Solo 3 proveedores, en orden de velocidad esperada:
+       1) PoseidonHD JSON por TMDB ID
+       2) PelisJuanita
+       3) Cuevana3
+       Early-stop al alcanzar WANT_SERVERS fuentes reproducibles. */
+    var out = [], plan = [
+        { n: "PoseidonHD", f: provPoseidon },
+        { n: "PelisJuanita", f: provJuanita },
+        { n: "Cuevana3", f: provCuevana }
+    ], i, servers = 0;
 
-    /*
-     * INDEXACION CENTRAL
-     * ------------------
-     * 1) TMDB ya resolvio titulo/año/IMDb/temporada/episodio.
-     * 2) Los indexadores buscan en paralelo, sin ranking de proveedor.
-     * 3) Todos los embeds encontrados entran en UNA cola.
-     * 4) resolveEmbed() decide que extractor usar segun el host.
-     * 5) Se conservan varias calidades/servidores.
-     */
-    providers.push({ n: "PelisJuanita", f: provPelisJuanita });
-    providers.push({ n: "Cuevana3", f: provCuevana });
-    providers.push({ n: "PoseidonHD", f: provPoseidon });
-    providers.push({ n: "PlPro", f: provPlPro });
-    for (i = 0; i < SITES.length && providers.length < INDEX_MAX_PROVIDERS; i++) {
-        if (SITES[i].id == "poseidonhd") continue;
-        if (SITES[i].extra && !extraSites()) continue;
-        providers.push({ n: SITES[i].name, f: (function (site) { return function (c) { return provSite(site, c); }; })(SITES[i]) });
-    }
+    try { prefetchProviders(ctx); } catch (e) { log("prefetchProviders -> " + e); }
 
-    /* Adelanto de las consultas principales de todos los indexadores. Esto no
-       decide cual gana: solo reduce la latencia del primer acceso. */
-    try { prefetchProviders(ctx); } catch (e) { log("index prefetch -> " + e); }
-
-    var all = [], pi;
-    for (pi = 0; pi < providers.length && budgetLeft(); pi++) {
-        log("> INDEX " + providers[pi].n);
+    for (i = 0; i < plan.length; i++) {
+        if (!budgetLeft()) { log("Tiempo agotado antes de " + plan[i].n); break; }
+        if (servers >= WANT_SERVERS) {
+            log("Suficientes servidores (" + servers + "), se omite " + plan[i].n);
+            break;
+        }
+        log("> " + plan[i].n);
         try {
-            var c = providers[pi].f(ctx) || [], j;
-            for (j = 0; j < c.length; j++) {
-                c[j].prov = c[j].prov || providers[pi].n;
-                all.push(c[j]);
-            }
-        } catch (e) { log("  INDEX ERROR " + providers[pi].n + ": " + e); }
+            var c = plan[i].f(ctx) || [];
+            servers += resolveCands(c, out, plan[i].n);
+        } catch (e) { log("  ERROR " + plan[i].n + ": " + e); }
     }
 
-    log("INDEX TOTAL candidatos=" + all.length);
-    resolveCands(all, out, "Index");
-
-    /* Deduplicacion final por URL + orden de idioma/calidad. No se descarta una
-       fuente solo porque otra ya reprodujo: el objetivo es devolver alternativas. */
-    var idx = [], seen = {}, s, key;
-    for (i = 0; i < out.length; i++) {
-        s = out[i]; key = String(s.url || "");
-        if (!key || seen[key]) continue;
-        seen[key] = 1;
-        idx.push({ s: s, i: i, r: langRank(String(s.name || "").split(" · ")[0]), q: fastQualityFromText(String(s.name || "")) || 0 });
+    var idx = [], j;
+    for (j = 0; j < out.length; j++) {
+        idx.push({ s: out[j], i: j, r: langRank(String(out[j].name || "").split(" \u00b7 ")[0]) });
     }
-    idx.sort(function (a, b) {
-        if (a.r != b.r) return a.r - b.r;
-        if (a.q != b.q) return b.q - a.q;
-        return a.i - b.i;
-    });
+    idx.sort(function (a, b) { return a.r != b.r ? a.r - b.r : a.i - b.i; });
     out = [];
-    for (i = 0; i < idx.length && i < WANT_SERVERS * 6; i++) out.push(idx[i].s);
+    for (j = 0; j < idx.length; j++) out.push(idx[j].s);
     return out;
 }
 
@@ -2180,7 +1930,6 @@ function details(url) {
     ));
     var poster = img(base.poster_path), title = ctx.titleEs || ctx.titleEn || "Sin t\u00edtulo";
     log("TMDB: es='" + ctx.titleEs + "' en='" + ctx.titleEn + "' year=" + ctx.year + (ctx.imdbId ? " imdb=" + ctx.imdbId : "") + (isTv ? " S" + ctx.season + "E" + ctx.episode : ""));
-    log("INDEX KEY: tmdb=" + ctx.id + (ctx.imdbId ? " imdb=" + ctx.imdbId : "") + " kind=" + ctx.kind + (isTv ? " S" + ctx.season + "E" + ctx.episode : ""));
     if (ctx.altTitles.length) log("TMDB AKAs usados para busqueda: " + ctx.altTitles.join(" | "));
 
     var epName = "", epOverview = "", epDate = 0, runtime = 0;
