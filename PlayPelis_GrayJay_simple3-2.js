@@ -469,7 +469,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
     "vimeos", "vidhide", "callistanise", "hgcloud.", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream.",
-    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com"];
+    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com", "playspelis.com", "321moviesfree.com"];
 /* 1fichier.com es un portal de descarga directa (cyberlocker) con captcha/espera,
    no un embed de video con m3u8/mp4 -> no vale la pena gastar tiempo/requests en
    intentarlo, se descarta antes de llegar al extractor generico. */
@@ -809,30 +809,45 @@ function exGeneric(url, label, ref, depth) {
  * El HTML trae jwplayer().setup({ file: "https://…onfilom.com/….m3u8?…" })
  * Los corchetes del id DEBEN ir URL-encoded o curl/http fallan. */
 function encodePlayerUrl(url) {
-    url = String(url || "");
-    /* solo codifica el query id si trae [ ] u otros chars problemáticos */
-    var m = /^(https?:\/\/[^?]+\?id=)(.+)$/i.exec(url);
+    /* Normaliza seriesplayer: el id puede traer / [ ] espacios y DEBE ir 100% encoded
+     *   ...?id=HASH-Title-Season-1/1
+     *   ...?id=HASH-Title-Season-1[AudioLatino]-1
+     * Si el / no se codifica, muchos clientes cortan la URL en el episodio. */
+    url = String(url || "").replace(/&amp;/g, "&");
+    var m = /^(https?:\/\/[^?#]+)\?(.*)$/i.exec(url);
     if (!m) return url;
-    try {
-        var id = decodeURIComponent(m[2]);
-        return m[1] + encodeURIComponent(id).replace(/%20/g, "+");
-    } catch (e) {
-        return m[1] + encodeURIComponent(m[2]);
+    var base = m[1], qs = m[2], id = "", rest = [], parts = qs.split("&"), i, kv;
+    for (i = 0; i < parts.length; i++) {
+        kv = parts[i].split("=");
+        if (String(kv[0]).toLowerCase() === "id") {
+            try { id = decodeURIComponent(kv.slice(1).join("=")); } catch (e) { id = kv.slice(1).join("="); }
+        } else if (parts[i]) rest.push(parts[i]);
     }
+    if (!id) return url;
+    var out = base + "?id=" + encodeURIComponent(id);
+    if (rest.length) out += "&" + rest.join("&");
+    return out;
 }
 function exSeriesPlayer(url, label, ref) {
     var fetchUrl = encodePlayerUrl(url);
     var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
-    var out = [];
-    if (!html) { log("    seriesplayer: sin HTML"); return out; }
+    var out = [], i;
+    if (!html) { log("    seriesplayer: sin HTML id=" + String(url).substring(0, 100)); return out; }
     if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
+    /* Referer del m3u8 = el player (CDN playspelis / 321moviesfree / onfilom lo piden) */
     out = scanMedia(html, label || "Juanita", fetchUrl, fetchUrl);
     if (!out.length) {
-        /* file: "…m3u8…" por si el regex general falla con query larga */
-        var re = /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i, m = re.exec(html);
-        if (m) addSrc(out, mkSrc(m[1], label || "Juanita HLS", fetchUrl, "hls"));
+        var re = /file\s*:\s*["'](https?:[^"']+)["']/i, m = re.exec(html);
+        if (m && /m3u8|\.mp4/i.test(m[1])) addSrc(out, mkSrc(m[1], label || "Juanita HLS", fetchUrl, "hls"));
     }
-    log("    seriesplayer -> " + out.length + (out.length ? " (" + String(out[0].url || "").substring(0, 80) + "…)" : ""));
+    /* Forzar HLS + referer del player en todas las fuentes sacadas */
+    for (i = 0; i < out.length; i++) {
+        if (out[i] && out[i].url && !out[i].requestModifier) {
+            var fixed = mkSrc(out[i].url, label || "Juanita HLS", fetchUrl, "hls");
+            if (fixed) out[i] = fixed;
+        }
+    }
+    log("    seriesplayer -> " + out.length + (out.length ? " (" + String(out[0].url || "").substring(0, 90) + "…)" : ""));
     return out;
 }
 
@@ -867,9 +882,10 @@ function resolveEmbed(url, label, ref, depth) {
     if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
     var h = hostOf(url), d;
     /* Juanita seriesplayer / fortamomar worker → m3u8 directo */
-    if (/fortamomar\.workers\.dev$/i.test(h) || /seriesplayer\./i.test(h) || /onfilom\.com$/i.test(h)) {
-        if (/\.m3u8/i.test(url)) {
-            var s0 = mkSrc(url, label || "Juanita HLS", ref, "hls");
+    if (/fortamomar\.workers\.dev$/i.test(h) || /seriesplayer\./i.test(h) ||
+        /onfilom\.com$/i.test(h) || /playspelis\.com$/i.test(h) || /321moviesfree\.com$/i.test(h)) {
+        if (/\.m3u8/i.test(url) || /\.mp4(?:\?|$)/i.test(url)) {
+            var s0 = mkSrc(url, label || "Juanita HLS", ref || "https://seriesplayer.fortamomar.workers.dev/", "hls");
             return s0 ? [s0] : [];
         }
         return exSeriesPlayer(url, label, ref);
