@@ -4,6 +4,7 @@
  * Unifica lo aprendido de PlayPelis, EpixPlay y FilmPlus:
  *  - Catalogo: TMDB (Home / Busqueda no dependen de webs externas).
  *  - Fuentes por TMDB (sin buscar por titulo en la web):
+ *      PoseidonHD2  -> /_next/data/{buildId}/es/pelicula|{serie}/{tmdbId}/...json  (indexacion nativa por TMDB ID)
  *      PelisJuanita  -> movieInfo.php?title=<slug>  /  serieInfo.php?nombreSerie=<slug>&nroTemporada=&nroEpisodio=
  *      Cuevana3.eu   -> /ver-pelicula/<slug>  /  /episodio/<slug>-temporada-S-episodio-E  (+ busqueda como plan B)
  *  - Fuentes por busqueda en sitios WordPress/DooPlay/Toroflix (dominios de FilmPlus y PlayPelis):
@@ -985,12 +986,45 @@ function exPackedHost(url, label, ref, depth) {
     return out;
 }
 
+/* Poseidon player.php envuelve el cyberlocker real (streamwish, vidhide, dood…).
+   El HTML trae el enlace final en texto plano; lo sacamos y resolvemos directo. */
+function exPoseidonPlayer(url, label, ref) {
+    var html = httpGet(url, ref || "https://www.poseidonhd2.co/"), out = [], links, i, more, j;
+    if (!html) return out;
+    /* enlaces de hosts conocidos en el HTML del player */
+    links = [];
+    var re = /https?:\/\/[^\s"'<>\\]+/gi, m;
+    while ((m = re.exec(html)) != null) {
+        var u = cleanUrl(m[0]);
+        if (!u || u === url) continue;
+        if (hostMatches(hostOf(u), UNSUPPORTED)) continue;
+        if (isServerUrl(u) || /\/e\/[a-z0-9]+/i.test(u) || /\/d\/[a-z0-9]+/i.test(u) || /embed/i.test(u)) {
+            if (links.indexOf(u) < 0) links.push(u);
+        }
+        if (links.length >= 8) break;
+    }
+    /* también iframes / redirects genéricos */
+    var disc = discoverLinks(html, url);
+    for (i = 0; i < disc.length; i++) if (links.indexOf(disc[i]) < 0) links.push(disc[i]);
+    for (i = 0; i < links.length && budgetLeft() && out.length < 6; i++) {
+        more = resolveEmbed(links[i], label, url, 1);
+        for (j = 0; j < more.length; j++) addSrc(out, more[j]);
+    }
+    if (!out.length) out = scanMedia(html, label, url, url);
+    log("    poseidon-player -> " + out.length + " (links=" + links.length + ")");
+    return out;
+}
+
 /* punto de entrada para cualquier URL de embed */
 function resolveEmbed(url, label, ref, depth) {
     depth = depth || 0;
     url = cleanUrl(url);
     if (!/^https?:\/\//i.test(url) || depth > 3 || !budgetLeft()) return [];
     var h = hostOf(url), d;
+    /* player.poseidonhd2.co / download.php: resolver al cyberlocker real */
+    if (/player\.poseidonhd2\.co$/i.test(h) || (/poseidonhd2\.co$/i.test(h) && /\/(?:player|download)\.php/i.test(url))) {
+        return exPoseidonPlayer(url, label, ref);
+    }
     /* cuevana3e.pro reparte sus "cyberlockers" detras de un subdominio propio que
        redirige via ?v=<base64(url_real)> (a veces ?token=... sin url visible, ese
        caso sigue de largo y se resuelve como pagina normal mas abajo). Decodificar
@@ -1417,20 +1451,129 @@ function verifiedIdentity(url, html, ctx) {
     return { ok: null, score: id || 0, reason: id ? "identidad parcial" : "sin identidad verificable", pageTitle: v.pageTitle || "" };
 }
 
-/* PoseidonHD2 expone el TMDB ID directamente en la ruta de pelicula.
-   Esto evita el buscador y elimina gran parte de los falsos positivos por titulo. */
+/* ------------------------------------------------------------------ */
+/* PoseidonHD2 — indexación nativa por TMDB ID (JSON Next.js)          */
+/* ------------------------------------------------------------------
+ * Endpoints confirmados:
+ *   Película:
+ *     /_next/data/{buildId}/es/pelicula/{tmdbId}/{slug}.json?tmdb={id}&movie={slug}
+ *   Episodio:
+ *     /_next/data/{buildId}/es/serie/{tmdbId}/{slug}/temporada/{S}/episodio/{E}.json?...
+ * El slug es cosmético (cualquier valor sirve). El buildId cambia en cada deploy
+ * y se cachea ~30 min. Los players salen listos en videos.{latino|spanish|english}
+ * como https://player.poseidonhd2.co/player.php?h=TOKEN
+ * ------------------------------------------------------------------ */
+
+var _poseidonBuildId = "";
+var _poseidonBuildAt = 0;
+var POSEIDON_BASE = "https://www.poseidonhd2.co";
+var POSEIDON_BUILD_TTL = 30 * 60 * 1000; /* 30 min */
+
+function poseidonBuildId() {
+    if (_poseidonBuildId && (Date.now() - _poseidonBuildAt) < POSEIDON_BUILD_TTL) return _poseidonBuildId;
+    var html = httpGet(POSEIDON_BASE + "/", POSEIDON_BASE + "/");
+    var m = /"buildId"\s*:\s*"([^"]+)"/.exec(html || "");
+    if (m && m[1]) {
+        _poseidonBuildId = m[1];
+        _poseidonBuildAt = Date.now();
+        log("  Poseidon buildId=" + _poseidonBuildId);
+    }
+    return _poseidonBuildId || "Q-i_R7Z4xGx1ZLVEa6Zzs";
+}
+
+function poseidonLangLabel(key) {
+    key = String(key || "").toLowerCase();
+    if (key === "latino") return "Latino";
+    if (key === "spanish" || key === "castellano") return "Castellano";
+    if (key === "english" || key === "ingles") return "Ingles";
+    return key ? (key.charAt(0).toUpperCase() + key.slice(1)) : "";
+}
+
+/* Extrae candidatos (player.php / download.php) desde el bloque videos/downloads del JSON */
+function poseidonExtractVideos(block, ref) {
+    var out = [], langs = ["latino", "spanish", "english"], i, j, list, v, lang;
+    if (!block) return out;
+    var videos = block.videos || {};
+    for (i = 0; i < langs.length; i++) {
+        list = videos[langs[i]] || [];
+        lang = poseidonLangLabel(langs[i]);
+        for (j = 0; j < list.length; j++) {
+            v = list[j];
+            if (!v || !v.result) continue;
+            var c = mkCand(v.result, lang, ref, "PoseidonHD");
+            c.identity = 100;
+            out.push(c);
+        }
+    }
+    var dls = block.downloads || [];
+    for (j = 0; j < dls.length; j++) {
+        if (!dls[j] || !dls[j].result) continue;
+        var d = mkCand(dls[j].result, dls[j].language || "", ref, "PoseidonHD");
+        d.identity = 100;
+        out.push(d);
+    }
+    return out;
+}
+
+function poseidonByTmdb(ctx) {
+    if (!ctx || !ctx.id) return [];
+    var bid = poseidonBuildId();
+    if (!bid) return [];
+    var slug = "x"; /* el slug no se valida en el endpoint de datos */
+    var url, body, data, block, out = [];
+
+    if (ctx.kind == "movie") {
+        url = POSEIDON_BASE + "/_next/data/" + bid + "/es/pelicula/" + ctx.id + "/" + slug +
+            ".json?tmdb=" + enc(ctx.id) + "&movie=" + slug;
+        body = httpGet(url, POSEIDON_BASE + "/");
+        data = parseJson(body);
+        if (!data || !data.pageProps) {
+            log("  Poseidon movie JSON vacío (tmdb=" + ctx.id + ")");
+            return [];
+        }
+        block = data.pageProps.thisMovie || data.pageProps.movie || null;
+        if (!block || String(block.TMDbId || "") !== String(ctx.id)) {
+            log("  Poseidon movie TMDbId no coincide o ausente");
+            return [];
+        }
+        out = poseidonExtractVideos(block, POSEIDON_BASE + "/");
+        log("  PoseidonHD TMDB-JSON movie " + ctx.id + " -> " + out.length + " players");
+        return out;
+    }
+
+    /* Serie / episodio */
+    var s = ctx.season || 1, e = ctx.episode || 1;
+    url = POSEIDON_BASE + "/_next/data/" + bid + "/es/serie/" + ctx.id + "/" + slug +
+        "/temporada/" + s + "/episodio/" + e +
+        ".json?tmdb=" + enc(ctx.id) + "&serie=" + slug + "&season=" + s + "&episode=" + e;
+    body = httpGet(url, POSEIDON_BASE + "/");
+    data = parseJson(body);
+    if (!data || !data.pageProps) {
+        log("  Poseidon ep JSON vacío (tmdb=" + ctx.id + " S" + s + "E" + e + ")");
+        return [];
+    }
+    block = data.pageProps.episode || null;
+    if (!block) {
+        log("  Poseidon ep sin bloque episode");
+        return [];
+    }
+    /* Algunos episodios traen TMDbId del show; no forzamos igualdad estricta si hay videos */
+    out = poseidonExtractVideos(block, POSEIDON_BASE + "/");
+    log("  PoseidonHD TMDB-JSON ep " + ctx.id + " S" + s + "E" + e + " -> " + out.length + " players");
+    return out;
+}
+
+/* Fallback HTML por ruta directa (por si el JSON falla o el buildId está desfasado) */
 function poseidonDirectUrls(ctx) {
     if (!ctx || !ctx.id) return [];
-    var slug = slugCuevana(ctx.titleEs || ctx.titleEn || ctx.titleOrig || "");
+    var slug = slugCuevana(ctx.titleEs || ctx.titleEn || ctx.titleOrig || "") || "x";
     var out = [];
     if (ctx.kind == "movie") {
-        out.push("https://www.poseidonhd2.co/pelicula/" + String(ctx.id) + "/" + slug);
-        out.push("https://poseidonhd2.co/pelicula/" + String(ctx.id) + "/" + slug);
+        out.push(POSEIDON_BASE + "/pelicula/" + String(ctx.id) + "/" + slug);
     } else {
-        /* La variante de serie no está confirmada por la indexación pública; se prueba
-           solo como candidato barato y, si no existe, se cae al buscador normal. */
-        out.push("https://www.poseidonhd2.co/serie/" + String(ctx.id) + "/" + slug);
-        out.push("https://poseidonhd2.co/serie/" + String(ctx.id) + "/" + slug);
+        out.push(POSEIDON_BASE + "/serie/" + String(ctx.id) + "/" + slug +
+            "/temporada/" + (ctx.season || 1) + "/episodio/" + (ctx.episode || 1));
+        out.push(POSEIDON_BASE + "/serie/" + String(ctx.id) + "/" + slug);
     }
     return uniq(out);
 }
@@ -1584,24 +1727,30 @@ function pageCandidates(html, pageUrl, base, site, ctx) {
 }
 
 function provPoseidon(ctx) {
-    var urls = poseidonDirectUrls(ctx), bodies = batchGet(urls, "https://www.poseidonhd2.co/"), out = [], i, j;
+    /* 1) Preferido: JSON Next.js indexado por TMDB ID (sin scraping de título) */
+    var out = poseidonByTmdb(ctx);
+    if (out.length) return out;
+
+    /* 2) Fallback HTML por ruta /pelicula/{id}/... o /serie/{id}/.../temporada/S/episodio/E */
+    var urls = poseidonDirectUrls(ctx), bodies = batchGet(urls, POSEIDON_BASE + "/"), i, j;
     for (i = 0; i < bodies.length; i++) {
         if (!bodies[i]) continue;
         var ver = verifiedIdentity(urls[i], bodies[i], ctx);
-        if (ver.ok === false) { log("  Poseidon directo descartado: " + ver.pageTitle); continue; }
-        if (ver.ok === true) log("  Poseidon identidad OK: " + ver.reason + (ver.pageTitle ? " -> " + ver.pageTitle : ""));
-        var c = pageCandidates(bodies[i], urls[i], "https://www.poseidonhd2.co", { mode: "wp" }, ctx);
+        if (ver.ok === false) { log("  Poseidon HTML descartado: " + ver.pageTitle); continue; }
+        if (ver.ok === true) log("  Poseidon HTML OK: " + ver.reason + (ver.pageTitle ? " -> " + ver.pageTitle : ""));
+        var c = pageCandidates(bodies[i], urls[i], POSEIDON_BASE, { name: "PoseidonHD", mode: "wp" }, ctx);
         if (!c.length) {
             var links = discoverLinks(bodies[i], urls[i]);
             for (j = 0; j < links.length; j++) c.push(mkCand(links[j], langOf(links[j]), urls[i], "PoseidonHD"));
             var media = scanMedia(bodies[i], "", urls[i], urls[i]);
             for (j = 0; j < media.length; j++) c.push({ url: "", lang: "", ref: urls[i], prov: "PoseidonHD", srcs: [media[j]] });
         }
-        for (j = 0; j < c.length; j++) { c[j].prov = "PoseidonHD"; c[j].identity = ver.score; out.push(c[j]); }
+        for (j = 0; j < c.length; j++) { c[j].prov = "PoseidonHD"; c[j].identity = ver.score || 80; out.push(c[j]); }
         if (out.length) break;
     }
-    if (out.length) { log("  Poseidon TMDB-direct -> " + out.length + " candidatos"); return out; }
-    /* fallback: buscador normal, pero solo después de agotar el ID exacto */
+    if (out.length) { log("  Poseidon HTML-direct -> " + out.length + " candidatos"); return out; }
+
+    /* 3) Último recurso: buscador por título del sitio */
     var site = null, k;
     for (k = 0; k < SITES.length; k++) if (SITES[k].id == "poseidonhd") { site = SITES[k]; break; }
     if (!site) return [];
@@ -2150,7 +2299,14 @@ var FEED_MIXED = (typeof Type !== "undefined" && Type && Type.Feed && Type.Feed.
 var ORDER_CHRONO = (typeof Type !== "undefined" && Type && Type.Order && Type.Order.Chronological) ? Type.Order.Chronological : "CHRONOLOGICAL";
 
 if (typeof source != "undefined") {
-    source.enable = function (conf, settings, savedState) { _settings = settings || {}; _fail = {}; _okh = {}; _pre = {}; };
+    source.enable = function (conf, settings, savedState) {
+        _settings = settings || {};
+        _fail = {};
+        _okh = {};
+        _pre = {};
+        _poseidonBuildId = "";
+        _poseidonBuildAt = 0;
+    };
     source.setSettings = function (s) { _settings = s || {}; };
     source.saveState = function () { return ""; };
     source.getHome = function () {
