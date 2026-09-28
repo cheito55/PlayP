@@ -469,7 +469,7 @@ var SERVER_HOSTS = ["streamsb.net", "streamsss.net", "ssbstream.net", "watchsb.c
     "okru.link", "ok.ru", "moonplayer.", "esplay.", "mycdn.moe", "acek-cdn.com", "dramiyos-cdn.com", "solo-latino.com",
     "streamwish", "hlswish", "wishembed", "awish", "vidhide", "filelions", "filemoon", "mixdrop", "mxdrop", "supervideo", "xupalace", "nuuuppp", "playhubconnect", "saidochesto",
     "vimeos", "vidhide", "callistanise", "hgcloud.", "vimeo.com", "vk.com", "vkvideo.ru", "odnoklassniki", "streamhub", "embedwish", "callistanise", "dhcplay", "minochinos", "lulustream", "luluvdo", "vtube", "vidguard", "bigwarp", "player.cuevana3", "vimeus.", "goodstream.",
-    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com", "playspelis.com", "321moviesfree.com"];
+    "fortamomar.workers.dev", "seriesplayer.", "onfilom.com", "playspelis.com", "321moviesfree.com", "flixlat.com"];
 /* 1fichier.com es un portal de descarga directa (cyberlocker) con captcha/espera,
    no un embed de video con m3u8/mp4 -> no vale la pena gastar tiempo/requests en
    intentarlo, se descarta antes de llegar al extractor generico. */
@@ -1045,14 +1045,27 @@ function resolveCands(cands, out, prov) {
         if (!k || seen[k]) continue;
         seen[k] = 1; list.push(c);
     }
-    list.sort(function (a, b) { return langRank(a.lang) - langRank(b.lang); });
-    /* adelantar en paralelo las paginas de los primeros candidatos (los que de
-       verdad se van a intentar, ver MAX_CAND) en vez de pedirlas una por una a
-       medida que el loop de abajo las necesita: es la optimizacion de velocidad
-       mas directa sobre "resolver un embed" porque la mayoria de los extractores
-       (voe, vidhide, generic, uqload...) arrancan con un unico httpGet(url). */
+    /* Priorizar seriesplayer/fortamomar (m3u8 directo) sobre cyberlockers lentos */
+    list.sort(function (a, b) {
+        function pri(u) {
+            u = String(u || "");
+            if (/fortamomar|seriesplayer/i.test(u)) return 0;
+            if (/onfilom|playspelis|flixlat|321moviesfree/i.test(u)) return 1;
+            return 5;
+        }
+        var pa = pri(a.url), pb = pri(b.url);
+        if (pa != pb) return pa - pb;
+        return langRank(a.lang) - langRank(b.lang);
+    });
     var pre = [], pn = Math.min(list.length, MAX_CAND);
-    for (i = 0; i < pn; i++) { if (list[i].url) pre.push(list[i].url); }
+    for (i = 0; i < pn; i++) {
+        if (list[i].url) {
+            /* no prefetch URLs con / sin encode: fallan y cachean vacío */
+            var pu = list[i].url;
+            if (/fortamomar|seriesplayer/i.test(pu)) pu = normalizeJuanitaPlayerUrl(pu);
+            if (pu) pre.push(pu);
+        }
+    }
     prefetchUrls(pre);
     var n = 0, good = 0;
     for (i = 0; i < list.length && n < MAX_CAND && budgetLeft(); i++) {
@@ -1166,15 +1179,24 @@ function provPoseidon(ctx) {
 /* PelisJuanita (por TMDB, sin busqueda)                               */
 /* ------------------------------------------------------------------ */
 
+function normalizeJuanitaPlayerUrl(u) {
+    u = cleanUrl(u);
+    if (!u) return "";
+    if (/fortamomar\.workers\.dev|seriesplayer\./i.test(u)) {
+        try { return encodePlayerUrl(u); } catch (e) { return u; }
+    }
+    return u;
+}
 function parseJuanita(html, base) {
-    /* ANTES se descartaba toda fila con data-tipo distinto de "stream", pero el
-       sitio tambien sirve servidores perfectamente reproducibles (Streamwish, Dood,
-       Goodstream) bajo data-tipo="download" (el modal "DESCARGAS" que se ve en el
-       sitio) -en varios titulos ESE es el unico tipo de fila que existe, y filtrarlo
-       hacia que la busqueda diera "0 fuentes" aunque la web mostrara servidores. Se
-       aceptan ambos tipos; solo se descartan explicitamente los que claramente no
-       son un host de video (torrent/magnet). */
-    var out = [], tags = findTags(html, /row-download/i), i;
+    /* Acepta stream + download. También captura seriesplayer/fortamomar aunque
+       no vengan en row-download (a veces están en iframe o JS). */
+    var out = [], tags = findTags(html, /row-download/i), i, m, re, seen = {};
+    function addU(u, lang) {
+        u = normalizeJuanitaPlayerUrl(absUrl(u, base));
+        if (!u || !/^https?:\/\//i.test(u) || seen[u]) return;
+        seen[u] = 1;
+        out.push(mkCand(u, lang || "", base + "/", "Juanita"));
+    }
     for (i = 0; i < tags.length; i++) {
         var a = attrsOf(tags[i].tag);
         var tipo = (a["data-tipo"] || "").toLowerCase();
@@ -1183,7 +1205,18 @@ function parseJuanita(html, base) {
         if (!u) continue;
         if (!/^https?:|^\/\//i.test(u)) { var d = b64decode(u); if (/^https?:\/\//i.test(d)) u = d; }
         var lang = langOf(a["data-idioma"] || "") || langOf(strip(html.substring(tags[i].end, tags[i].end + 250)));
-        out.push(mkCand(absUrl(u, base), lang, base + "/", "Juanita"));
+        addU(u, lang);
+    }
+    /* seriesplayer con id que puede traer / o [Audio…] */
+    re = /https?:\/\/(?:seriesplayer\.)?fortamomar\.workers\.dev\/\?id=[^\s"'<>\\]+/gi;
+    while ((m = re.exec(html || "")) != null) addU(m[0].replace(/&amp;/g, "&"), "Latino");
+    re = /https?:\/\/seriesplayer\.[^\s"'<>\\]+\/\?id=[^\s"'<>\\]+/gi;
+    while ((m = re.exec(html || "")) != null) addU(m[0].replace(/&amp;/g, "&"), "Latino");
+    /* iframes del player */
+    tags = findTags(html, /^<iframe\b/i);
+    for (i = 0; i < tags.length; i++) {
+        var a2 = attrsOf(tags[i].tag), src = a2["src"] || a2["data-src"] || "";
+        if (/fortamomar|seriesplayer|onfilom|playspelis|flixlat/i.test(src)) addU(src, "");
     }
     return out;
 }
