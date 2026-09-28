@@ -1144,12 +1144,15 @@ function resolveCands(cands, out, prov) {
     var pre = [], pn = Math.min(list.length, MAX_CAND);
     for (i = 0; i < pn; i++) {
         if (list[i].url) {
-            /* no prefetch URLs con / sin encode: fallan y cachean vacío */
-            var pu = list[i].url;
-            if (/fortamomar|seriesplayer/i.test(pu)) pu = normalizeJuanitaPlayerUrl(pu);
-            if (pu) pre.push(pu);
-        }
+    var pu = list[i].url;
+
+    // SeriesPlayer/Fortamomar se resuelve directamente en exSeriesPlayer().
+    // No hacer prefetch porque puede provocar doble codificación y cachear
+    // una respuesta vacía con una URL diferente.
+    if (!/fortamomar|seriesplayer/i.test(pu)) {
+        if (pu) pre.push(pu);
     }
+}
     prefetchUrls(pre);
     var n = 0, good = 0;
     for (i = 0; i < list.length && n < MAX_CAND && budgetLeft(); i++) {
