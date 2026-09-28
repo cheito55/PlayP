@@ -32,12 +32,16 @@ var MAX_HTML = 1200000;
 var MAX_CAND = 4;
 var WANT_SERVERS = 3;      /* 3 fuentes por título (si una satura, quedan otras) */
 var BUDGET_MS = 45000;
-/* Top sitios vivos (sep-2026). Poseidon/Juanita/Cuevana van aparte en collectSources. */
-var CORE_SITE_IDS = {
+/* Películas vs series: listas distintas (series/novelas primero si es TV). */
+var CORE_MOVIE_IDS = {
     "pelisplus": 1, "pelisflix": 1, "pelisxd": 1,
     "entrepeliculas": 1, "pelisplushd100": 1, "milpelis": 1, "pelispop": 1
 };
-var MAX_WP_PROVIDERS = 7;
+var CORE_SERIES_IDS = {
+    "tvserieslatino": 1, "seriesbiblicas": 1, "serieslan": 1,
+    "retrotve": 1, "retrocanal": 1, "serieslandia": 1
+};
+var MAX_WP_PROVIDERS = 8;
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -1774,20 +1778,28 @@ function cuevanaAltSlugs(ctx) {
 /* ------------------------------------------------------------------ */
 
 var SITES = [
-    /* --- Top catálogo (vivos, sep-2026) --- */
-    { id: "pelisplus", name: "PelisPlusHD", bases: [
+    /* --- Películas (prioridad cuando kind=movie) --- */
+    { id: "pelisplus", name: "PelisPlusHD", kind: "movie", bases: [
         "https://pelisplushd.la",
         "https://pelisplushd.baby",
         "https://pelisplus-hd.rest",
         "https://pelisplushd.bz",
         "https://milpelis.net"
       ], search: ["/search?s={q}", "/search/{q}/1", "/inicio/?s={q}"], mode: "pelisplus" },
-    { id: "pelisflix", name: "Pelisflix1", bases: ["https://pelisflix1.tv", "https://pelisflix1.fans"], search: ["/?s={q}"], mode: "wp" },
-    { id: "pelisxd", name: "PelisXD", bases: ["https://www.pelisxd.com"], search: ["/?s={q}"], mode: "wp" },
-    { id: "entrepeliculas", name: "EntrePeliculas", bases: ["https://entrepeliculasyseries.nz"], search: ["/?s={q}"], mode: "wp" },
-    { id: "pelisplushd100", name: "PelisPlus100", bases: ["https://pelisplushd100.lol"], search: ["/search?s={q}", "/?s={q}"], mode: "pelisplus" },
-    { id: "milpelis", name: "MilPelis", bases: ["https://milpelis.net"], search: ["/search?s={q}", "/inicio/?s={q}"], mode: "pelisplus" },
-    { id: "pelispop", name: "PelisPop", bases: ["https://pelispop.mov"], search: ["/?s={q}"], mode: "wp" }
+    { id: "pelisflix", name: "Pelisflix1", kind: "movie", bases: ["https://pelisflix1.tv", "https://pelisflix1.fans"], search: ["/?s={q}"], mode: "wp" },
+    { id: "pelisxd", name: "PelisXD", kind: "movie", bases: ["https://www.pelisxd.com"], search: ["/?s={q}"], mode: "wp" },
+    { id: "entrepeliculas", name: "EntrePeliculas", kind: "movie", bases: ["https://entrepeliculasyseries.nz"], search: ["/?s={q}"], mode: "wp" },
+    { id: "pelisplushd100", name: "PelisPlus100", kind: "movie", bases: ["https://pelisplushd100.lol"], search: ["/search?s={q}", "/?s={q}"], mode: "pelisplus" },
+    { id: "milpelis", name: "MilPelis", kind: "movie", bases: ["https://milpelis.net"], search: ["/search?s={q}", "/inicio/?s={q}"], mode: "pelisplus" },
+    { id: "pelispop", name: "PelisPop", kind: "movie", bases: ["https://pelispop.mov"], search: ["/?s={q}"], mode: "wp" },
+
+    /* --- Series / novelas (prioridad cuando kind=tv) --- */
+    { id: "tvserieslatino", name: "TVSeriesLatino", kind: "series", bases: ["https://www.tvserieslatino.com"], search: ["/?s={q}"], mode: "wp" },
+    { id: "seriesbiblicas", name: "SeriesBiblicas", kind: "series", bases: ["https://seriesbiblicas.net"], search: ["/?s={q}"], mode: "wp" },
+    { id: "serieslan", name: "SeriesLan", kind: "series", bases: ["https://serieslan.lat"], search: ["/?s={q}"], mode: "wp" },
+    { id: "retrotve", name: "RetroTVE", kind: "series", bases: ["https://retrotve.com"], search: ["/?s={q}"], mode: "wp" },
+    { id: "retrocanal", name: "RetroCanal", kind: "series", bases: ["https://retrocanal.net"], search: ["/?s={q}"], mode: "wp" },
+    { id: "serieslandia", name: "SeriesLandia", kind: "series", bases: ["https://serieslandia.com"], search: ["/?s={q}"], mode: "wp" }
 ];
 
 /* variantes de consulta para buscar en un sitio: titulo es/en + hasta 2 AKAs de
@@ -1815,29 +1827,21 @@ function tmdbSlugList(ctx) {
     return uniq(out).slice(0, 6);
 }
 function tmdbDirectUrls(site, ctx) {
-    var slugs = tmdbSlugList(ctx), urls = [], bi, si, base, s;
-    for (bi = 0; bi < site.bases.length && urls.length < 12; bi++) {
+    /* Pocas URLs: no quemar el budget con 12 404s por sitio */
+    var slugs = tmdbSlugList(ctx).slice(0, 3), urls = [], bi, si, base, s;
+    var maxBases = Math.min(site.bases.length, 2);
+    for (bi = 0; bi < maxBases && urls.length < 4; bi++) {
         base = site.bases[bi].replace(/\/+$/, "");
-        for (si = 0; si < slugs.length && urls.length < 12; si++) {
+        for (si = 0; si < slugs.length && urls.length < 4; si++) {
             s = slugs[si];
             if (site.mode == "pelisplus") {
-                if (ctx.kind == "movie") {
-                    urls.push(base + "/pelicula/" + s);
-                    urls.push(base + "/movies/" + s);
-                } else {
-                    urls.push(base + "/serie/" + s + "/season/" + (ctx.season || 1) + "/episode/" + (ctx.episode || 1));
-                    urls.push(base + "/series/" + s + "/" + (ctx.season || 1) + "/" + (ctx.episode || 1));
-                    urls.push(base + "/serie/" + s);
-                }
+                if (ctx.kind == "movie") urls.push(base + "/pelicula/" + s);
+                else urls.push(base + "/serie/" + s + "/season/" + (ctx.season || 1) + "/episode/" + (ctx.episode || 1));
             } else {
-                if (ctx.kind == "movie") {
-                    urls.push(base + "/pelicula/" + s);
-                    urls.push(base + "/peliculas/" + s);
-                    urls.push(base + "/movie/" + s);
-                } else {
+                if (ctx.kind == "movie") urls.push(base + "/pelicula/" + s);
+                else {
                     urls.push(base + "/serie/" + s);
                     urls.push(base + "/series/" + s);
-                    urls.push(base + "/episode/" + s + "-temporada-" + (ctx.season || 1) + "-episodio-" + (ctx.episode || 1));
                 }
             }
         }
@@ -1851,8 +1855,10 @@ function siteFind(site, ctx) {
     for (di = 0; di < direct.length && budgetLeft(); di++) {
         dUrl = direct[di];
         dHtml = httpGet(dUrl, site.bases[0] + "/");
-        if (!dHtml || dHtml.length < 2000) continue;
-        if (/no (encontr|exist)|not found|404|página no/i.test(dHtml) && dHtml.length < 8000) continue;
+        if (!dHtml || dHtml.length < 4000) continue;
+        if (/no (encontr|exist)|not found|404|p[aá]gina no|just a moment/i.test(dHtml) && dHtml.length < 12000) continue;
+        /* Debe parecer página de contenido real (player / iframes / data-url) */
+        if (!/iframe|data-url|data-src|dooplay|player|embed|trembed|wp-content/i.test(dHtml)) continue;
         var v = verifyPageTitle(dHtml, ctx);
         if (v.ok === false) continue;
         log("  TMDB-slug OK: " + dUrl.substring(0, 100) + (v.pageTitle ? " ('" + v.pageTitle + "')" : ""));
@@ -2084,13 +2090,13 @@ function prefetchProviders(ctx) {
         }
     } catch (e) { log("prefetch poseidon -> " + e); }
 
-    /* primeras URLs directas por slug TMDB de cada sitio core */
-    for (i = 0; i < SITES.length && urls.length < 14; i++) {
+    /* pocas URLs directas TMDB de sitios prioritarios según movie/tv */
+    var prefIds = (ctx.kind == "tv") ? CORE_SERIES_IDS : CORE_MOVIE_IDS;
+    for (i = 0; i < SITES.length && urls.length < 10; i++) {
         site = SITES[i];
-        if (!site || !CORE_SITE_IDS[site.id]) continue;
+        if (!site || !prefIds[site.id]) continue;
         d = tmdbDirectUrls(site, ctx);
         if (d.length) urls.push(d[0]);
-        if (d.length > 1) urls.push(d[1]);
     }
 
     slug1 = slugCuevana(ctx.titleEs || ctx.titleEn || "");
@@ -2112,22 +2118,37 @@ function collectSources(ctx) {
      */
     var out = [], plan = [], i, servers = 0, site, wp = 0;
 
-    /* Prioridad: Poseidon (TMDB JSON) → sitios top con slug TMDB → Cuevana → Juanita (CF, último) */
+    /*
+     * Películas: Poseidon → sitios movie → Cuevana → Juanita
+     * Series: Poseidon → sitios series/novelas → sitios movie (fallback) → Cuevana → Juanita
+     */
+    var isTv = ctx.kind == "tv";
+    var coreIds = isTv ? CORE_SERIES_IDS : CORE_MOVIE_IDS;
+    var fallbackIds = isTv ? CORE_MOVIE_IDS : null;
+
     plan.push({ n: "PoseidonHD", f: function (c) { return provPoseidon(c); }, fast: 1 });
-    for (i = 0; i < SITES.length; i++) {
-        site = SITES[i];
-        if (!site || site.id == "poseidonhd") continue;
-        if (!CORE_SITE_IDS[site.id] && !extraSites()) continue;
-        if (!extraSites() && wp >= MAX_WP_PROVIDERS) continue;
-        wp++;
-        plan.push({
-            n: site.name,
-            f: (function (s) {
-                return function (c) { return provSite(s, c); };
-            })(site),
-            fast: 1
-        });
+
+    function pushSites(ids, label) {
+        var n = 0;
+        for (i = 0; i < SITES.length; i++) {
+            site = SITES[i];
+            if (!site || !ids[site.id]) continue;
+            if (!extraSites() && n >= MAX_WP_PROVIDERS) break;
+            n++;
+            plan.push({
+                n: site.name + (label ? " " + label : ""),
+                f: (function (s) {
+                    return function (c) { return provSite(s, c); };
+                })(site),
+                fast: 1
+            });
+        }
+        return n;
     }
+
+    wp = pushSites(coreIds, "");
+    if (fallbackIds) pushSites(fallbackIds, "(fb)");
+
     plan.push({ n: "Cuevana3", f: function (c) { return provCuevana(c); }, fast: 0 });
     plan.push({ n: "PelisJuanita", f: function (c) { return provJuanita(c); }, fast: 0 });
 
