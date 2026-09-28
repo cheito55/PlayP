@@ -809,50 +809,55 @@ function exGeneric(url, label, ref, depth) {
  * El HTML trae jwplayer().setup({ file: "https://…onfilom.com/….m3u8?…" })
  * Los corchetes del id DEBEN ir URL-encoded o curl/http fallan. */
 function encodePlayerUrl(url) {
-    /* Normaliza seriesplayer: el id puede traer / [ ] espacios y DEBE ir 100% encoded
-     *   ...?id=HASH-Title-Season-1/1
-     *   ...?id=HASH-Title-Season-1[AudioLatino]-1
-     * Si el / no se codifica, muchos clientes cortan la URL en el episodio. */
-    url = String(url || "").replace(/&amp;/g, "&");
-    var m = /^(https?:\/\/[^?#]+)\?(.*)$/i.exec(url);
+    /* Codifica id completo: Season-1[AudioC2A0Latino]-1  y  Season-1/1 */
+    url = String(url || "").replace(/&amp;/g, "&").replace(/\\\//g, "/");
+    var m = /^(https?:\/\/[^?#]+)\?id=(.+)$/i.exec(url);
     if (!m) return url;
-    var base = m[1], qs = m[2], id = "", rest = [], parts = qs.split("&"), i, kv;
-    for (i = 0; i < parts.length; i++) {
-        kv = parts[i].split("=");
-        if (String(kv[0]).toLowerCase() === "id") {
-            try { id = decodeURIComponent(kv.slice(1).join("=")); } catch (e) { id = kv.slice(1).join("="); }
-        } else if (parts[i]) rest.push(parts[i]);
-    }
-    if (!id) return url;
-    var out = base + "?id=" + encodeURIComponent(id);
-    if (rest.length) out += "&" + rest.join("&");
-    return out;
+    var id;
+    try { id = decodeURIComponent(m[2]); } catch (e) { id = m[2]; }
+    return m[1] + "?id=" + encodeURIComponent(id);
 }
+
 function exSeriesPlayer(url, label, ref) {
-    var out = [];
+    /* Extractor estable JWPlayer → m3u8 (sin deps a funciones borradas). */
+    var out = [], fetchUrl, html, m, m3u8, s, lab;
     try {
-        var fetchUrl = encodePlayerUrl(url);
-        log("    seriesplayer GET " + String(fetchUrl).substring(0, 130));
-        var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
-        if (!html) { log("    seriesplayer: sin HTML"); return out; }
-        if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
-        if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) {
-            log("    seriesplayer: Cloudflare challenge");
+        fetchUrl = encodePlayerUrl(cleanUrl(url));
+        lab = label || "Juanita";
+        log("    seriesplayer GET " + fetchUrl.substring(0, 140));
+        html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
+        if (!html || html.length < 50) {
+            log("    seriesplayer: sin HTML");
             return out;
         }
-        var urls = extractM3u8FromPlayerHtml(html), i, s;
-        for (i = 0; i < urls.length && out.length < 2; i++) {
-            s = mkHlsSafe(urls[i], (label || "Juanita") + " HLS");
-            if (s) addSrc(out, s);
+        if (/ID no v[\u00e1a]lido/i.test(html)) {
+            log("    seriesplayer: ID no valido");
+            return out;
         }
-        if (!out.length) {
-            var re = /file\s*:\s*["'](https?:[^"']+)["']/i, m = re.exec(html);
-            if (m) {
-                s = mkHlsSafe(m[1], (label || "Juanita") + " HLS");
-                if (s) addSrc(out, s);
-            }
+        m = /file\s*:\s*["'](https?:[^"']+)["']/i.exec(html);
+        if (m && /\.m3u8/i.test(m[1])) m3u8 = cleanUrl(m[1]);
+        if (!m3u8) {
+            m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html);
+            if (m) m3u8 = cleanUrl(m[1]);
         }
-        log("    seriesplayer -> " + out.length + (out.length ? " :: " + String(out[0].url).substring(0, 110) : ""));
+        if (!m3u8) {
+            m = /(https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/i.exec(html);
+            if (m) m3u8 = cleanUrl(m[0]);
+        }
+        if (!m3u8) {
+            log("    seriesplayer: sin m3u8 en HTML (" + html.length + "b)");
+            return out;
+        }
+        s = mkSrc(m3u8, lab + " HLS", fetchUrl, "hls");
+        if (!s) {
+            try { s = new HLSSource({ name: lab + " HLS", url: m3u8, duration: 0 }); } catch (e2) { s = null; }
+        }
+        if (s) {
+            addSrc(out, s);
+            log("    seriesplayer OK :: " + m3u8.substring(0, 120));
+        } else {
+            log("    seriesplayer: falló crear source");
+        }
     } catch (e) {
         log("    seriesplayer ERROR: " + e);
     }
@@ -884,36 +889,6 @@ function exPoseidonPlayer(url, label, ref) {
     return out;
 }
 
-function mkHlsSafe(u, label) {
-    u = cleanUrl(u);
-    if (!u || !/^https?:\/\//i.test(u)) return null;
-    try {
-        return new HLSSource({ name: label || "HLS", url: u, duration: 0 });
-    } catch (e) {
-        log("    mkHlsSafe: " + e);
-        return null;
-    }
-}
-function extractM3u8FromPlayerHtml(html) {
-    var found = [], seen = {}, re, m;
-    if (!html) return found;
-    function add(x) {
-        x = cleanUrl(String(x || ""));
-        if (!x || !/^https?:\/\//i.test(x)) return;
-        if (!/\.m3u8/i.test(x) && !/[?&](?:format|type)=m3u8/i.test(x)) return;
-        if (seen[x]) return;
-        seen[x] = 1;
-        found.push(x);
-    }
-    re = /file\s*:\s*["'](https?:[^"']+)["']/gi;
-    while ((m = re.exec(html)) != null) add(m[1]);
-    re = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/gi;
-    while ((m = re.exec(html)) != null) add(m[1]);
-    re = /(https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/gi;
-    while ((m = re.exec(html)) != null) add(m[1]);
-    return found;
-}
-
 function resolveEmbed(url, label, ref, depth) {
     depth = depth || 0;
     try {
@@ -925,7 +900,7 @@ function resolveEmbed(url, label, ref, depth) {
             /onfilom\.com$/i.test(h) || /playspelis\.com$/i.test(h) || /321moviesfree\.com$/i.test(h) ||
             /flixlat\.com$/i.test(h)) {
             if (/\.m3u8/i.test(url)) {
-                var s0 = mkHlsSafe(url, label || "Juanita HLS");
+                var s0 = mkSrc(url, label || "Juanita HLS", ref || "https://seriesplayer.fortamomar.workers.dev/", "hls");
                 return s0 ? [s0] : [];
             }
             if (/\.mp4(?:\?|$)/i.test(url)) {
