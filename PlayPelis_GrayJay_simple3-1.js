@@ -30,8 +30,8 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 var MAX_ITEMS = 40;
 var MAX_HTML = 1200000;
 var MAX_CAND = 3;
-var WANT_SERVERS = 1;      /* 1 fuente reproducible → corta el resto (más rápido) */
-var BUDGET_MS = 28000;
+var WANT_SERVERS = 2;      /* 2 fuentes por título (si una satura, queda la otra) */
+var BUDGET_MS = 35000;
 var CORE_SITE_IDS = { "pelisplus": 1, "cinecalidad": 1 };
 var MAX_WP_PROVIDERS = 2;
 
@@ -815,8 +815,8 @@ function exGeneric(url, label, ref, depth) {
  * El HTML trae jwplayer().setup({ file: "https://…onfilom.com/….m3u8?…" })
  * Los corchetes del id DEBEN ir URL-encoded o curl/http fallan. */
 function encodePlayerUrl(url) {
-    /* Codifica id completo: Season-1[AudioC2A0Latino]-1  y  Season-1/1 */
-    url = String(url || "").replace(/&amp;/g, "&").replace(/\\\//g, "/");
+    /* Codifica [ ] / en el id para que no se corte la URL */
+    url = String(url || "").replace(/&amp;/g, "&");
     var m = /^(https?:\/\/[^?#]+)\?id=(.+)$/i.exec(url);
     if (!m) return url;
     var id;
@@ -825,55 +825,24 @@ function encodePlayerUrl(url) {
 }
 
 function exSeriesPlayer(url, label, ref) {
-    /* Extractor estable JWPlayer → m3u8. Cache de sesión por URL. */
-    var out = [], fetchUrl, html, m, m3u8, s, lab, cacheKey;
-    try {
-        fetchUrl = encodePlayerUrl(cleanUrl(url));
-        lab = label || "Juanita";
-        cacheKey = fetchUrl;
-        if (_spCache[cacheKey]) {
-            m3u8 = _spCache[cacheKey];
-            s = mkSrc(m3u8, lab + " HLS", fetchUrl, "hls");
-            if (s) { addSrc(out, s); log("    seriesplayer CACHE :: " + m3u8.substring(0, 100)); }
-            return out;
-        }
-        log("    seriesplayer GET " + fetchUrl.substring(0, 140));
-        html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
-        if (!html || html.length < 50) {
-            log("    seriesplayer: sin HTML");
-            return out;
-        }
-        if (/ID no v[\u00e1a]lido/i.test(html)) {
-            log("    seriesplayer: ID no valido");
-            return out;
-        }
-        m = /file\s*:\s*["'](https?:[^"']+)["']/i.exec(html);
-        if (m && /\.m3u8/i.test(m[1])) m3u8 = cleanUrl(m[1]);
-        if (!m3u8) {
-            m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html);
-            if (m) m3u8 = cleanUrl(m[1]);
-        }
-        if (!m3u8) {
-            m = /(https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*)/i.exec(html);
-            if (m) m3u8 = cleanUrl(m[0]);
-        }
-        if (!m3u8) {
-            log("    seriesplayer: sin m3u8 en HTML (" + html.length + "b)");
-            return out;
-        }
-        _spCache[cacheKey] = m3u8;
-        s = mkSrc(m3u8, lab + " HLS", fetchUrl, "hls");
-        if (!s) {
-            try { s = new HLSSource({ name: lab + " HLS", url: m3u8, duration: 0 }); } catch (e2) { s = null; }
-        }
-        if (s) {
-            addSrc(out, s);
-            log("    seriesplayer OK :: " + m3u8.substring(0, 120));
-        } else {
-            log("    seriesplayer: falló crear source");
-        }
-    } catch (e) {
-        log("    seriesplayer ERROR: " + e);
+    /* Versión simple (como al inicio): player HTML → file m3u8 → HLSSource */
+    var out = [];
+    var fetchUrl = encodePlayerUrl(cleanUrl(url));
+    var html = httpGet(fetchUrl, ref || "https://pelisjuanita.com/");
+    if (!html) { log("    seriesplayer: sin HTML"); return out; }
+    if (/ID no v[\u00e1a]lido/i.test(html)) { log("    seriesplayer: ID no valido"); return out; }
+
+    var m = /file\s*:\s*["'](https?:[^"']+\.m3u8[^"']*)["']/i.exec(html);
+    if (!m) m = /["'](https?:\/\/[^"']+\.m3u8[^"']*)["']/i.exec(html);
+    if (!m) {
+        log("    seriesplayer: sin m3u8");
+        return out;
+    }
+    var m3u8 = cleanUrl(m[1]);
+    var s = mkSrc(m3u8, (label || "Juanita") + " HLS", fetchUrl, "hls");
+    if (s) {
+        addSrc(out, s);
+        log("    seriesplayer -> 1 :: " + m3u8.substring(0, 100));
     }
     return out;
 }
