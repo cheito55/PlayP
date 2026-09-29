@@ -1,5 +1,8 @@
 /*
- * PelisHub v1.1.8 - GrayJay source (ES5)
+ * PelisHub v1.1.9 - GrayJay source (ES5)
+ *  - Dominios Streamflix (LatAm): cine24h, cinecalidad, flixlatam, seriesflix,
+ *    sololatino, pelisflixhd, doramasflix, lacartoons, latanime, pelisplus…
+ *  - Busqueda: 1 portada (TMDB). Reproduccion: multi-servidor en config de video
  *  - Busqueda estilo Streamflix: 1 portada por titulo (TMDB), sin duplicados
  *  - Al reproducir: multi-servidor (Poseidon/Juanita/Pelisflix/Cuevana) para cambiar
  *
@@ -38,8 +41,12 @@ var WANT_SERVERS = 3;      /* 3 fuentes reproducibles y se corta (early-stop) */
 var MAX_RESULTS = 6;       /* servidores visibles en el reproductor (cambiar de dominio) */
 var SRC_CACHE_MS = 20 * 60 * 1000; /* los tokens hdnts duran ~24h, 20 min es seguro */
 var BUDGET_MS = 45000;
-var CORE_SITE_IDS = { "pelisplus": 1, "cinecalidad": 1 };
-var MAX_WP_PROVIDERS = 2;
+var CORE_SITE_IDS = {
+    "pelisplus": 1, "cinecalidad": 1, "cine24h": 1, "flixlatam": 1,
+    "pelisflixhd": 1, "seriesflix": 1, "sololatino": 1, "doramasflix": 1,
+    "lacartoons": 1, "latanime": 1
+};
+var MAX_WP_PROVIDERS = 10; /* top Streamflix LatAm al abrir el video */
 
 var PLPRO_BASE = "https://plpro.org";
 var PLPRO_USER = "p";
@@ -1948,8 +1955,25 @@ function cuevanaAltSlugs(ctx) {
 /* ------------------------------------------------------------------ */
 
 var SITES = [
-    { id: "pelisplus", name: "PelisPlus", bases: ["https://pelisplushd.bz", "https://pelisplushd.nu"], search: ["/search?s={q}", "/search/{q}/1"], mode: "pelisplus" },
-    { id: "cinecalidad", name: "Cinecalidad", bases: ["https://cinecalidad.onl"], search: ["/?s={q}"], mode: "wp" }
+    /* Dominios alineados con Streamflix Reborn (LatAm VOD) — mirrors vivos sep-2026 */
+    { id: "pelisplus", name: "PelisPlus", bases: [
+        "https://pelisplushd.baby", "https://pelisplushd.bz", "https://milpelis.net"
+      ], search: ["/search?s={q}", "/search/{q}/1", "/inicio/?s={q}"], mode: "pelisplus" },
+    { id: "cinecalidad", name: "Cinecalidad", bases: [
+        "https://cinecalidad.am", "https://www.cinecalidad.ec", "https://cinecalidad.onl"
+      ], search: ["/?s={q}"], mode: "wp" },
+    { id: "cine24h", name: "Cine24h", bases: ["https://cine24h.online"], search: ["/?s={q}"], mode: "wp" },
+    { id: "flixlatam", name: "FlixLatam", bases: ["https://flixlatam.com"], search: ["/?s={q}", "/search?s={q}"], mode: "wp" },
+    { id: "pelisflixhd", name: "PelisflixHD", bases: [
+        "https://pelisflixhd1.top", "https://pelisflixhd.win"
+      ], search: ["/?s={q}", "/search?s={q}"], mode: "wp" },
+    { id: "seriesflix", name: "SeriesFlix", bases: [
+        "https://seriesflixhd.casa", "https://seriesflixhd.lol"
+      ], search: ["/?s={q}", "/search?s={q}"], mode: "wp" },
+    { id: "sololatino", name: "SoloLatino", bases: ["https://sololatino.net"], search: ["/?s={q}"], mode: "wp" },
+    { id: "doramasflix", name: "Doramasflix", bases: ["https://doramasflix.in"], search: ["/?s={q}", "/search?s={q}"], mode: "wp" },
+    { id: "lacartoons", name: "LaCartoons", bases: ["https://www.lacartoons.com"], search: ["/?s={q}"], mode: "wp" },
+    { id: "latanime", name: "Latanime", bases: ["https://latanime.org"], search: ["/?s={q}", "/buscar?q={q}"], mode: "wp" }
 ];
 
 /* variantes de consulta para buscar en un sitio: titulo es/en + hasta 2 AKAs de
@@ -2255,6 +2279,7 @@ function pelisflixPrefetchUrls(ctx) {
     return ["https://pelisflix1.tv/search?s=" + q];
 }
 
+/* Camino rapido (JSON/API). El resto de dominios Streamflix va por SITES/WP. */
 var PROVIDERS = [
     { id: "poseidon", name: "PoseidonHD", fast: 1, early: 1, cap: 8000, prefetch: poseidonPrefetchUrls, candidates: provPoseidon },
     { id: "juanita", name: "PelisJuanita", fast: 1, early: 1, cap: 14000, prefetch: juanitaPrefetchUrls, candidates: provJuanita },
