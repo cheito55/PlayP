@@ -1,7 +1,7 @@
 {
   "name": "PelisHub",
-  "description": "Películas y series con catálogo TMDB. Fuentes: PelisJuanita, Cuevana3, PelisPlus, PelisHouse, Cinetux y más.",
-  "author": "PlayPelis",
+  "description": "Películas y series con catálogo TMDB.",
+  "author": "cheito55",
   "authorUrl": "https://github.com/cheito55",
   "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
