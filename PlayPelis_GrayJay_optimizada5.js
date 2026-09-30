@@ -192,9 +192,23 @@ function verifyPageTitle(html, ctx) {
     var tm = /<title[^>]*>([^<]+)<\/title>/i.exec(html) || /property=["']og:title["'][^>]*content=["']([^"']+)["']/i.exec(html) || /<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(html);
     var pageTitle = tm ? clean(strip(tm[1])) : "";
     if (!pageTitle) return { ok: null, pageTitle: "" };
+
+    // Evaluar cobertura del texto
     var cov = Math.max(titleCoverage(pageTitle, ctx.titleEs || ""), titleCoverage(pageTitle, ctx.titleEn || ""), titleCoverage(pageTitle, ctx.titleOrig || ""));
+
+    // 1. Intento original: Buscar el año en el título
     var yr = (/\b((?:19|20)\d{2})\b/.exec(pageTitle) || [])[1] || "";
+
+    // 2. NUEVO RESPALDO: Si no está en el título, buscar en la meta descripción o etiquetas ocultas del HTML
+    if (!yr) {
+        var metaYear = (/<meta[^>]+(?:name|property)=["'][^"']*(?:description|date|year)["'][^>]+content=["'][^"']*\b((?:19|20)\d{2})\b/i.exec(html) || [])[1] || "";
+        if (metaYear) yr = metaYear;
+    }
+
+    // 3. Evaluación final: Si cazamos un año y hay más de 1 año de diferencia, se descarta.
+    // Si tras buscar en título y metadatos no hay año (!yr es true), se aprueba por beneficio de la duda.
     var yearOk = !yr || !ctx.year || Math.abs(parseInt(yr, 10) - parseInt(ctx.year, 10)) <= 1;
+
     return { ok: cov >= 70 && yearOk, pageTitle: pageTitle, cov: cov, year: yr };
 }
 function slugJuanita(t) {
