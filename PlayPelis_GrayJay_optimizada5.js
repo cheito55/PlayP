@@ -3193,41 +3193,49 @@ function lacartoonsPrefetchUrls(ctx) {
 }
 /* Proveedor directo OK.ru: Busca en segundo plano usando el título exacto de TMDB */
 
+/* Proveedor directo OK.ru: Busca en segundo plano usando el título exacto de TMDB */
+
 function provOkruDirect(ctx) {
     var out = [];
     if (!ctx || !ctx.titleEs || !budgetLeft()) return out;
     
-    // Armar la búsqueda con el título y el año (para mayor precisión)
+    // Armar la búsqueda (ej: "Cholo 1972")
     var q = ctx.titleEs + (ctx.year ? " " + ctx.year : "");
     var searchUrl = "https://ok.ru/video/search?st.search=" + enc(q);
     var html = httpGet(searchUrl, "https://ok.ru/");
     if (!html) return out;
 
-    // Buscar enlaces de video en los resultados
-    var re = /<a[^>]+href=["'](\/video\/(\d+))["'][^>]*>([\s\S]*?)<\/a>/gi;
+    // Nueva Regex: Captura los atributos de la etiqueta <a> (m[1]) y su contenido interno (m[3])
+    var re = /<a([^>]+href=["']\/video\/(\d+)["'][^>]*)>([\s\S]*?)<\/a>/gi;
     var m, seen = {};
 
     while ((m = re.exec(html)) != null && out.length < 4 && budgetLeft()) {
+        var attrs = m[1];
         var videoId = m[2];
+        var inner = m[3];
+        
         if (seen[videoId]) continue;
         
-        var titleText = clean(strip(m[3]));
-        if (!titleText || titleText.length < 3) continue;
+        // 1. Rescatar el título escondido en aria-label, title o data-title
+        var titleAttr = (attrs.match(/(?:title|aria-label|data-title)=["']([^"']+)["']/i) || [])[1] || "";
+        // 2. Rescatar el título del texto alternativo de la imagen
+        var altAttr = (inner.match(/alt=["']([^"']+)["']/i) || [])[1] || "";
+        // 3. Plan C: Texto plano si los atributos fallan
+        var text = titleAttr || altAttr || clean(strip(inner));
         
-        // FILTRO ESTRICTO: Exigir al menos 80% de coincidencia exacta con el título de TMDB
-        // Esto evita que traiga videos como "Resumen de la película X"
-        var cov = titleCoverage(titleText, ctx.titleEs);
-        if (cov >= 80) {
+        if (!text || text.length < 3) continue;
+        
+        // Relajar un poco la cobertura para títulos cortos como "Cholo"
+        var cov = titleCoverage(text, ctx.titleEs);
+        if (cov >= 70 || text.toLowerCase().indexOf(ctx.titleEs.toLowerCase()) >= 0) {
             seen[videoId] = 1;
             var videoUrl = "https://ok.ru/video/" + videoId;
-            // Se envía a resolver. El extractor nativo exOkRu se encargará de sacar el mp4/hls
             out.push(mkCand(videoUrl, "Latino", searchUrl, "OK.ru"));
         }
     }
-    log("  OK.ru Directo -> " + out.length + " candidatos encontrados");
+    log("  OK.ru Directo -> " + out.length + " candidatos para " + q);
     return out;
 }
-
 
 var PROVIDERS = [
     /* Camino rapido Streamflix: ID-first + early-stop. Cap corto por proveedor. */
