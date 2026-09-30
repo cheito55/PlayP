@@ -3191,6 +3191,42 @@ function lacartoonsPrefetchUrls(ctx) {
     var t = ctx.titleEs || ctx.titleEn || "";
     return t ? [LACARTOONS_BASE + "/?Titulo=" + enc(t)] : [];
 }
+/* Proveedor directo OK.ru: Busca en segundo plano usando el título exacto de TMDB */
+
+function provOkruDirect(ctx) {
+    var out = [];
+    if (!ctx || !ctx.titleEs || !budgetLeft()) return out;
+    
+    // Armar la búsqueda con el título y el año (para mayor precisión)
+    var q = ctx.titleEs + (ctx.year ? " " + ctx.year : "");
+    var searchUrl = "https://ok.ru/video/search?st.search=" + enc(q);
+    var html = httpGet(searchUrl, "https://ok.ru/");
+    if (!html) return out;
+
+    // Buscar enlaces de video en los resultados
+    var re = /<a[^>]+href=["'](\/video\/(\d+))["'][^>]*>([\s\S]*?)<\/a>/gi;
+    var m, seen = {};
+
+    while ((m = re.exec(html)) != null && out.length < 4 && budgetLeft()) {
+        var videoId = m[2];
+        if (seen[videoId]) continue;
+        
+        var titleText = clean(strip(m[3]));
+        if (!titleText || titleText.length < 3) continue;
+        
+        // FILTRO ESTRICTO: Exigir al menos 80% de coincidencia exacta con el título de TMDB
+        // Esto evita que traiga videos como "Resumen de la película X"
+        var cov = titleCoverage(titleText, ctx.titleEs);
+        if (cov >= 80) {
+            seen[videoId] = 1;
+            var videoUrl = "https://ok.ru/video/" + videoId;
+            // Se envía a resolver. El extractor nativo exOkRu se encargará de sacar el mp4/hls
+            out.push(mkCand(videoUrl, "Latino", searchUrl, "OK.ru"));
+        }
+    }
+    log("  OK.ru Directo -> " + out.length + " candidatos encontrados");
+    return out;
+}
 
 
 var PROVIDERS = [
@@ -3200,6 +3236,7 @@ var PROVIDERS = [
     { id: "cuevanaapi", name: "Cuevana", fast: 1, early: 1, cap: 6000, prefetch: cuevanaApiPrefetchUrls, candidates: provCuevanaApi },
     { id: "lacartoons", name: "LaCartoons", fast: 1, early: 1, cap: 5000, prefetch: lacartoonsPrefetchUrls, candidates: provLaCartoons },
     { id: "esplay", name: "Esplay", fast: 0, early: 0, cap: 4000, prefetch: esplayPrefetchUrls, candidates: provEsplay },
+    { id: "okrudirect", name: "OK.ru", fast: 0, early: 0, cap: 5000, prefetch: function(){return [];}, candidates: provOkruDirect },
     { id: "pelisplusto", name: "PelisPlus", fast: 0, early: 0, cap: 5000, prefetch: pptoPrefetchUrls, candidates: provPelisplusTo },
     { id: "sololatino", name: "SoloLatino", fast: 0, early: 0, cap: 5000, prefetch: soloPrefetchUrls, candidates: provSoloLatino },
     { id: "pelisflix1", name: "Pelisflix1", fast: 0, early: 0, cap: 4000, prefetch: pelisflixPrefetchUrls, candidates: provPelisflix1 },
