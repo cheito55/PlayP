@@ -3244,10 +3244,10 @@ var PROVIDERS = [
     { id: "cuevanaapi", name: "Cuevana", fast: 1, early: 1, cap: 6000, prefetch: cuevanaApiPrefetchUrls, candidates: provCuevanaApi },
     { id: "lacartoons", name: "LaCartoons", fast: 1, early: 1, cap: 5000, prefetch: lacartoonsPrefetchUrls, candidates: provLaCartoons },
     { id: "esplay", name: "Esplay", fast: 0, early: 0, cap: 4000, prefetch: esplayPrefetchUrls, candidates: provEsplay },
-    { id: "okrudirect", name: "OK.ru", fast: 0, early: 0, cap: 5000, prefetch: function(){return [];}, candidates: provOkruDirect },
+    { id: "okrudirect", name: "OK.ru", fast: 1, early: 0, cap: 5000, prefetch: function(){return [];}, candidates: provOkruDirect },
     { id: "pelisplusto", name: "PelisPlus", fast: 0, early: 0, cap: 5000, prefetch: pptoPrefetchUrls, candidates: provPelisplusTo },
     { id: "sololatino", name: "SoloLatino", fast: 0, early: 0, cap: 5000, prefetch: soloPrefetchUrls, candidates: provSoloLatino },
-    { id: "pelisflix1", name: "Pelisflix1", fast: 0, early: 0, cap: 4000, prefetch: pelisflixPrefetchUrls, candidates: provPelisflix1 },
+    { id: "pelisflix1", name: "Pelisflix1", fast: 1, early: 0, cap: 4000, prefetch: pelisflixPrefetchUrls, candidates: provPelisflix1 },
     { id: "cuevana", name: "Cuevana3", fast: 0, early: 0, cap: 5000, prefetch: cuevanaPrefetchUrls, candidates: provCuevana }
 ];
 
