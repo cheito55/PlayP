@@ -3199,17 +3199,29 @@ function okruCollectSearchHits(html) {
 function okruLanguageRank(title, ctx) {
     var t = normalizeTitle(title || ""), es = normalizeTitle((ctx && ctx.titleEs) || ""), en = normalizeTitle((ctx && ctx.titleEn) || ""), r = 0;
     if (!t) return 0;
-    if (/\b(latino|latam|audio latino|espanol|castellano|doblado|doblaje)\b/i.test(t)) r += 60;
-    if (es && t.indexOf(es) >= 0) r += 35;
-    else if (es) r += Math.min(25, okruTitleScore(title, es) * 0.25);
-    if (en && t.indexOf(en) >= 0 && (!es || t.indexOf(es) < 0)) r -= 35;
+    
+    // Agregamos "dual" a las palabras clave obligatorias
+    if (/\b(latino|latam|audio latino|espanol|castellano|doblado|doblaje|dual)\b/i.test(t)) r += 60;
+    
+    // Si el título ES y EN son idénticos, no damos puntos automáticos por idioma a menos que tenga una etiqueta explícita
+    if (es && en && es === en) {
+        if (r === 0) return 0; // Es ambiguo, no lo marcamos como español automáticamente
+    } else {
+        if (es && t.indexOf(es) >= 0) r += 35;
+        if (en && t.indexOf(en) >= 0 && (!es || t.indexOf(es) < 0)) r -= 35;
+    }
     return r;
 }
 function okruLooksSpanish(title, ctx) {
     return okruLanguageRank(title, ctx) >= 25;
 }
 function okruLanguageLabel(title, ctx) {
-    if (/\b(latino|latam|audio latino|espanol|castellano|doblado|doblaje)\b/i.test(String(title || ""))) return "Latino";
+    if (/\b(latino|latam|audio latino|espanol|castellano|doblado|doblaje|dual)\b/i.test(String(title || ""))) return "Latino/Dual";
+    
+    var es = (ctx && ctx.titleEs) ? normalizeTitle(ctx.titleEs) : "";
+    var en = (ctx && ctx.titleEn) ? normalizeTitle(ctx.titleEn) : "";
+    if (es && en && es === en) return ""; // Evitar falsos positivos en títulos bilingües
+    
     if (ctx && ctx.titleEs && okruTitleScore(title, ctx.titleEs) >= 75 && (!ctx.titleEn || okruTitleScore(title, ctx.titleEn) < 75)) return "Español";
     if (ctx && ctx.titleEn && okruTitleScore(title, ctx.titleEn) >= 75) return "Original";
     return "";
