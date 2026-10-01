@@ -3131,13 +3131,26 @@ function okruCollectSearchHits(html) {
     while ((m = re.exec(html)) != null && list.length < 60) {
         id = m[2]; attrs = m[1]; inner = m[3];
         title = "";
+        
+        // 1. Buscar en atributos principales del enlace
         am = /(?:title|aria-label|data-title|data-name)\s*=\s*["']([^"']{2,300})["']/i.exec(attrs);
         if (am) title = clean(am[1]);
+        
+        // 2. Buscar en el atributo 'alt' de la imagen (la portada)
         if (okruIsGenericTitle(title)) {
-            am = /(?:title|aria-label|data-title|data-name|alt)\s*=\s*["']([^"']{2,300})["']/i.exec(block || "");
+            am = /alt\s*=\s*["']([^"']{2,300})["']/i.exec(inner);
             if (am) title = clean(am[1]);
         }
+        
+        // 3. Buscar en textos dentro de divs/spans de título
+        if (okruIsGenericTitle(title)) {
+            am = /<(?:span|div)[^>]*class=["'][^"']*(?:title|name|caption)[^"']*["'][^>]*>([\s\S]{1,300}?)<\/(?:span|div)>/i.exec(inner);
+            if (am) title = clean(strip(am[1]));
+        }
+        
+        // 4. Último recurso: texto plano dentro del enlace
         if (okruIsGenericTitle(title)) title = clean(strip(inner));
+        
         addHit(id, title);
     }
 
@@ -3176,6 +3189,7 @@ function okruCollectSearchHits(html) {
     }
     return list;
 }
+
 function okruSourcesFromMeta(meta, label) {
     var srcs = [], hls, vids, vi, vu, s, lab = label || "OK.ru";
     if (!meta) return srcs;
