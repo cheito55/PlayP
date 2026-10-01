@@ -463,23 +463,41 @@ function mkSrc(u, label, ref, force) {
 
 /* Fuentes OK.ru / okcdn SIN requestModifier ni headers extra.
    El CDN ya firma la URL; inyectar Referer/Origin rompe reproducción nativa y Chromecast. */
+function okRequestModifier() {
+    var h = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+    };
+    return {
+        headers: h,
+        modifyRequest: function (url, headers) {
+            var newHeaders = {};
+            // Limpia las cabeceras de ExoPlayer y retiene solo el User-Agent
+            for (var k in h) newHeaders[k] = h[k];
+            return { url: url, headers: newHeaders };
+        }
+    };
+}
+
 function mkSrcBare(u, label, force) {
     u = cleanUrl(u);
     if (!/^https?:\/\//i.test(u)) return null;
     var type = force || inferMediaType(u);
+    
+    var opts = { name: label || "HLS", url: u, duration: 0 };
+    // Fundamental: previene que GrayJay envíe la cookie de sesión al CDN
+    opts.requestModifier = okRequestModifier();
+
     if (type == "hls") {
-        try { return new HLSSource({ name: label || "HLS", url: u, duration: 0 }); } catch (e) { log("mkSrcBare hls -> " + e); return null; }
+        try { return new HLSSource(opts); } catch (e) { log("mkSrcBare hls -> " + e); return null; }
     }
     if (type == "dash" && typeof DashSource == "function") {
-        try { return new DashSource({ name: label || "DASH", url: u, duration: 0 }); } catch (e) { log("mkSrcBare dash -> " + e); return null; }
+        opts.name = label || "DASH";
+        try { return new DashSource(opts); } catch (e) { log("mkSrcBare dash -> " + e); return null; }
     }
     if (type == "mp4" || !type) {
-        try {
-            return new VideoUrlSource({
-                width: 0, height: 0, container: "video/mp4", codec: "",
-                name: label || "MP4", bitrate: 0, duration: 0, url: u
-            });
-        } catch (e) { log("mkSrcBare mp4 -> " + e); return null; }
+        opts.name = label || "MP4";
+        opts.width = 0; opts.height = 0; opts.container = "video/mp4"; opts.codec = ""; opts.bitrate = 0;
+        try { return new VideoUrlSource(opts); } catch (e) { log("mkSrcBare mp4 -> " + e); return null; }
     }
     return null;
 }
