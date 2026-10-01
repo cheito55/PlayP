@@ -6,7 +6,7 @@
   "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
   "scriptUrl": "./PlayPelis_GrayJay_optimizada6-8-9.js",
-  "version": 17,
+  "version": 18,
   "iconUrl": "./PlayP.jpg",
   "id": "b7a2e4c1-3d5f-4e8a-9c26-1f0d7a5b8e34",
   "scriptSignature": "",
@@ -21,7 +21,7 @@
   "authentication": {
     "userAgent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
     "loginUrl": "https://ok.ru/",
-    "completionUrl": "https://ok.ru/feed",
+    "completionUrl": "https://ok.ru/",
     "cookiesToFind": [
       "JSESSIONID",
       "AUTHCODE",
