@@ -5,8 +5,8 @@
   "authorUrl": "https://github.com/cheito55",
   "sourceUrl": "https://raw.githubusercontent.com/cheito55/PlayP/main/PlayPelis_GrayJay_v4.json",
   "repositoryUrl": "https://github.com/cheito55/PlayP",
-  "scriptUrl": "./PlayPelis_GrayJay_optimizada6-8-8.js",
-  "version": 16,
+  "scriptUrl": "./PlayPelis_GrayJay_optimizada6-8-9.js",
+  "version": 17,
   "iconUrl": "./PlayP.jpg",
   "id": "b7a2e4c1-3d5f-4e8a-9c26-1f0d7a5b8e34",
   "scriptSignature": "",
@@ -18,7 +18,24 @@
   "allowUrls": [
     "everywhere"
   ],
+  "authentication": {
+    "userAgent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    "loginUrl": "https://ok.ru/",
+    "completionUrl": "https://ok.ru/feed",
+    "cookiesToFind": [
+      "JSESSIONID",
+      "AUTHCODE",
+      "domain_sid"
+    ]
+  },
   "settings": [
+    {
+      "variable": "soloOkru",
+      "name": "Buscar solo en OK.ru",
+      "description": "No consulta Poseidon, Cuevana, Juanita, etc. Requiere iniciar sesión en OK.ru (login del source).",
+      "type": "Boolean",
+      "default": "true"
+    },
     {
       "variable": "extraSites",
       "name": "Buscar en sitios extra",
