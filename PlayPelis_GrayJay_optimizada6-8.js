@@ -3434,15 +3434,19 @@ function okruDiscoverViaWeb(q) {
         seen[vid] = 1;
         list.push({ id: vid, name: clean(name || "") });
     }
+    
     function harvest(page) {
         if (!page) return;
         raw = htmlUnescape(String(page))
             .replace(/\\u0026/gi, "&").replace(/\\u002F/gi, "/").replace(/\\\//g, "/")
             .replace(/%2F/gi, "/").replace(/%3A/gi, ":");
+            
         re = /ok\.ru\/(?:video|videoembed)\/(\d{6,})/gi;
         while ((m = re.exec(raw)) != null) addId(m[1], "");
+        
         re = /ok\.ru%2F(?:video|videoembed)%2F(\d{6,})/gi;
         while ((m = re.exec(String(page))) != null) addId(m[1], "");
+        
         re = /uddg=([^&"']+)/gi;
         while ((m = re.exec(String(page))) != null) {
             try { u = dec(m[1].replace(/\+/g, " ")); } catch (e1) { u = m[1]; }
@@ -3453,17 +3457,17 @@ function okruDiscoverViaWeb(q) {
 
     /* Pocas URLs, fail-fast: si 2 seguidas dan 0 bytes, cortar (red bloquea el buscador). */
     urls = [
-        "https://html.duckduckgo.com/html/?q=" + enc("site:ok.ru/video " + q),
         "https://lite.duckduckgo.com/lite/?q=" + enc("site:ok.ru/video " + q),
         "https://yandex.com/search/?text=" + enc("site:ok.ru/video " + q),
         "https://yandex.com/search/?text=" + enc(q + " ok.ru/video"),
         "https://www.bing.com/search?q=" + enc("site:ok.ru/video " + q),
-        "https://html.duckduckgo.com/html/?q=" + enc(q + " ok.ru video")
+        "https://lite.duckduckgo.com/lite/?q=" + enc(q + " ok.ru video")
     ];
 
     for (i = 0; i < urls.length && list.length < 12 && budgetLeft(); i++) {
         html = httpGet(urls[i], originOf(urls[i]) + "/");
         log("  web-discover bytes=" + (html ? html.length : 0) + " hasOk=" + (html && /ok\.ru/i.test(html) ? "1" : "0") + " url=" + hostOf(urls[i]));
+        
         if (!html || html.length < 200) {
             emptyStreak++;
             if (emptyStreak >= 2) {
@@ -3472,16 +3476,20 @@ function okruDiscoverViaWeb(q) {
             }
             continue;
         }
+        
         emptyStreak = 0;
         harvest(html);
+        
         if (list.length) {
             log("  OK.ru via web-discover q='" + q.substring(0, 36) + "' -> " + list.length + " ids");
             return list;
         }
     }
+    
     log("  OK.ru via web-discover sin resultados q='" + q.substring(0, 36) + "'");
     return list;
 }
+
 function provOkruDirect(ctx) {
     var out = [], i, j, q, queries = [], seenQ = {}, hits = [], seenHit = {}, html, id, emb, meta, movieTitle, score, srcs, cand;
     if (!ctx || !budgetLeft()) return out;
