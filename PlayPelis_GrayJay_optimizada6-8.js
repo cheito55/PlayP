@@ -3455,13 +3455,11 @@ function okruDiscoverViaWeb(q) {
         }
     }
 
-    /* Pocas URLs, fail-fast: si 2 seguidas dan 0 bytes, cortar (red bloquea el buscador). */
+    /* Bing y Yandex al principio: menos propensos a bloquear GrayJay que DDG */
     urls = [
-        "https://lite.duckduckgo.com/lite/?q=" + enc("site:ok.ru/video " + q),
-        "https://yandex.com/search/?text=" + enc("site:ok.ru/video " + q),
-        "https://yandex.com/search/?text=" + enc(q + " ok.ru/video"),
         "https://www.bing.com/search?q=" + enc("site:ok.ru/video " + q),
-        "https://lite.duckduckgo.com/lite/?q=" + enc(q + " ok.ru video")
+        "https://yandex.com/search/?text=" + enc("site:ok.ru/video " + q),
+        "https://lite.duckduckgo.com/lite/?q=" + enc("site:ok.ru/video " + q)
     ];
 
     for (i = 0; i < urls.length && list.length < 12 && budgetLeft(); i++) {
@@ -3502,14 +3500,17 @@ function provOkruDirect(ctx) {
         seenQ[k] = 1;
         queries.push(s);
     }
+    
     addQ((ctx.titleEs || "") + (ctx.year ? " " + ctx.year : ""));
     addQ((ctx.titleEn || "") + (ctx.year ? " " + ctx.year : ""));
     addQ(ctx.titleEs);
     addQ(ctx.titleEn);
     addQ(ctx.titleOrig);
-    if (ctx.altTitles) for (i = 0; i < ctx.altTitles.length; i++) {
-        addQ(ctx.altTitles[i] + (ctx.year ? " " + ctx.year : ""));
-        addQ(ctx.altTitles[i]);
+    if (ctx.altTitles) {
+        for (i = 0; i < ctx.altTitles.length; i++) {
+            addQ(ctx.altTitles[i] + (ctx.year ? " " + ctx.year : ""));
+            addQ(ctx.altTitles[i]);
+        }
     }
     if (ctx.titleEs) addQ(ctx.titleEs + " pelicula");
     if (!queries.length) return out;
@@ -3527,23 +3528,25 @@ function provOkruDirect(ctx) {
 
     log("  OK.ru queries: " + queries.slice(0, 4).join(" | "));
 
-    /* 1) Búsqueda nativa OK.ru primero (pocas peticiones; en WiFi a veces responde) */
-    for (i = 0; i < Math.min(queries.length, 3) && hits.length < 16 && budgetLeft(); i++) {
-        q = queries[i];
-        html = okruFetchSearchPage(q);
-        if (!html) continue;
-        pushHits(okruCollectSearchHits(html));
-        log("  OK.ru search '" + q.substring(0, 40) + "' -> hits acumulados " + hits.length);
-        if (hits.length >= 6) break;
+    /* 1) BÚSQUEDA WEB EXTERNA PRIMERO (Bing/Yandex/DDG). 
+       Es más rápida y no sufre los bloqueos severos de ok.ru. */
+    for (i = 0; i < Math.min(queries.length, 2) && hits.length < 16 && budgetLeft(); i++) {
+        pushHits(okruDiscoverViaWeb(queries[i]));
+        if (hits.length >= 4) break;
     }
 
-    /* 2) Buscadores externos solo si OK.ru vino vacío (DDG/Yandex/Bing, fail-fast) */
-    if (hits.length < 2 && budgetLeft()) {
-        for (i = 0; i < Math.min(queries.length, 2) && hits.length < 16 && budgetLeft(); i++) {
-            pushHits(okruDiscoverViaWeb(queries[i]));
-            if (hits.length >= 4) break;
+    /* 2) BÚSQUEDA DIRECTA EN OK.RU (Solo como respaldo si sobra tiempo) */
+    if (hits.length < 4 && budgetLeft()) {
+        for (i = 0; i < queries.length && hits.length < 16 && budgetLeft(); i++) {
+            q = queries[i];
+            html = okruFetchSearchPage(q);
+            if (!html) continue;
+            pushHits(okruCollectSearchHits(html));
+            log("  OK.ru search '" + q.substring(0, 40) + "' -> hits acumulados " + hits.length);
+            if (hits.length >= 8) break;
         }
     }
+    
     log("  OK.ru candidatos crudos: " + hits.length);
 
     var ranked = [];
@@ -3560,10 +3563,11 @@ function provOkruDirect(ctx) {
             log("  OK.ru pre-skip id=" + id + " pre=" + ranked[i].pre + " '" + movieTitle.substring(0, 40) + "'");
             continue;
         }
-        /* embed público (funciona sin login; el CDN firma por IP del cliente) */
+        
         emb = httpGet("https://ok.ru/videoembed/" + id, "https://ok.ru/");
         if (!emb) emb = httpGet("https://ok.ru/video/" + id, "https://ok.ru/");
         if (!emb) continue;
+        
         meta = okParseMeta(emb);
         if (meta && meta.movie) {
             movieTitle = clean(meta.movie.title || meta.movie.name || "") || movieTitle;
@@ -3578,35 +3582,35 @@ function provOkruDirect(ctx) {
             }
         }
         if (okruIsGenericTitle(movieTitle)) movieTitle = ranked[i].name || "";
+        
         score = okruBestScore(movieTitle, ctx);
         var yr = (/\b((?:19|20)\d{2})\b/.exec(movieTitle) || [])[1] || "";
         var yearOk = !yr || !ctx.year || Math.abs(parseInt(yr, 10) - parseInt(ctx.year, 10)) <= 1;
+        
         if (score < 45 || !yearOk) {
             log("  OK.ru skip id=" + id + " score=" + score + " yearOk=" + yearOk + " '" + String(movieTitle).substring(0, 50) + "'");
             continue;
         }
+        
         srcs = okruSourcesFromMeta(meta, "OK.ru");
         if (!srcs.length) {
             log("  OK.ru id=" + id + " match score=" + score + " pero sin stream '" + String(movieTitle).substring(0, 40) + "'");
             continue;
         }
+        
         cand = mkCand("https://ok.ru/video/" + id, "Latino", "https://ok.ru/", "OK.ru");
         cand.srcs = srcs;
         out.push(cand);
         log("  OK.ru HIT id=" + id + " score=" + score + " streams=" + srcs.length + " '" + String(movieTitle).substring(0, 50) + "'");
     }
+    
     if (!out.length) {
-        log("  OK.ru RESULTADO: 0 fuentes (busqueda web/DDG sin match reproducible)");
+        log("  OK.ru RESULTADO: 0 fuentes");
     } else {
         log("  OK.ru RESULTADO: " + out.length + " fuente(s) OK");
     }
-    log("  OK.ru total candidatos reproducibles: " + out.length);
     return out;
 }
-
-
-
-
 
 
 
