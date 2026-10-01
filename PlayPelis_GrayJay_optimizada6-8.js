@@ -486,27 +486,38 @@ function inferMediaType(u) {
     return "";
 }
 /* force = "hls" | "mp4" | "dash": para URLs sin extension (ok.ru, vk, vimeo...) */
-function mkSrc(u, label, ref, force) {
+function mkSrcBare(u, label, force) {
     u = cleanUrl(u);
     if (!/^https?:\/\//i.test(u)) return null;
-    var rm = reqMod(ref), o, type = force || inferMediaType(u);
+    var type = force || inferMediaType(u);
+    
+    var o = { 
+        name: label || "Video", 
+        url: u, 
+        duration: 0,
+        requestModifier: {
+            headers: { "User-Agent": UA },
+            modifyRequest: function (url, headers) {
+                headers = headers || {};
+                headers["User-Agent"] = UA;
+                return { url: url, headers: headers };
+            }
+        }
+    };
+
     if (type == "hls") {
-        o = { name: label || "HLS", url: u, duration: 0 };
-        if (rm) o.requestModifier = rm;
-        return new HLSSource(o);
+        try { return new HLSSource(o); } catch (e) { log("mkSrcBare hls -> " + e); return null; }
     }
     if (type == "dash" && typeof DashSource == "function") {
-        o = { name: label || "DASH", url: u, duration: 0 };
-        if (rm) o.requestModifier = rm;
-        try { return new DashSource(o); } catch (e) { log("mkSrc dash -> " + e); }
+        try { return new DashSource(o); } catch (e) { log("mkSrcBare dash -> " + e); return null; }
     }
-    if (type == "mp4") {
-        o = { width: 0, height: 0, container: "video/mp4", codec: "", name: label || "MP4", bitrate: 0, duration: 0, url: u };
-        if (rm) o.requestModifier = rm;
-        return new VideoUrlSource(o);
+    if (type == "mp4" || !type) {
+        o.width = 0; o.height = 0; o.container = "video/mp4"; o.codec = ""; o.bitrate = 0;
+        try { return new VideoUrlSource(o); } catch (e) { log("mkSrcBare mp4 -> " + e); return null; }
     }
     return null;
 }
+
 /* Fuentes OK.ru / okcdn SIN requestModifier ni headers extra.
    El CDN ya firma la URL (expires/sig/srcIp); inyectar Referer/Origin rompe
    reproducción nativa y Chromecast (lección del plugin OK.ru v12_CAST). */
@@ -1856,12 +1867,12 @@ function resolveCands(cands, out, prov, need) {
         c = list[i];
         var label = (c.lang ? c.lang + " \u00b7 " : "") + prov + " \u00b7 " + (c.url ? prettyHost(c.url) : "directo"), got = [], j;
         if (c.srcs) {
-            /* Conservar calidad (720p/HLS/...) en el nombre; si no, el selector
-               de GrayJay une todas bajo la misma etiqueta y solo muestra 1-2. */
-            for (j = 0; j < c.srcs.length; j++) {
-                var qn = String(c.srcs[j].name || "").replace(/^OK\.ru\s*/i, "").trim();
-                c.srcs[j].name = qn ? (label + " · " + qn) : label;
-                got.push(c.srcs[j]);
+            /* Conservar calidad en el nombre para evitar que el selector
+               de GrayJay las agrupe como duplicados. */
+            for (j = 0; j < c.srcs.length; j++) { 
+                var orig = c.srcs[j].name || "";
+                c.srcs[j].name = label + (orig.indexOf("OK.ru") >= 0 ? orig.replace("OK.ru", "") : " " + orig);
+                got.push(c.srcs[j]); 
             }
         } else {
             var t0 = Date.now();
@@ -1870,9 +1881,7 @@ function resolveCands(cands, out, prov, need) {
             for (j = 0; j < got.length; j++) if (got[j] && got[j].url) _lat[got[j].url] = ms;
         }
         n++;
-        /* loguear tambien la(s) URL(s) resueltas, no solo la cantidad -
-           asi se puede ver si un proveedor esta devolviendo una fuente valida
-           o solo un match "falso positivo" del escaneo generico. */
+        /* loguear tambien la(s) URL(s) resueltas, no solo la cantidad */
         var urlsFound = [];
         for (j = 0; j < got.length; j++) urlsFound.push(String(got[j].url || "").substring(0, 140));
         log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length + (urlsFound.length ? " :: " + urlsFound.join(" | ") : ""));
@@ -1882,6 +1891,7 @@ function resolveCands(cands, out, prov, need) {
     }
     return good;
 }
+
 
 /* ------------------------------------------------------------------ */
 /* ------------------------------------------------------------------ */
