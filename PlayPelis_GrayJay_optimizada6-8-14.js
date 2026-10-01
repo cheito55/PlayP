@@ -48,7 +48,7 @@ var SERVER_MODES = [{ want: 2, max: 4, extra: 2000 }, { want: 4, max: 6, extra: 
 function serverMode() {
     var v = _settings && _settings.serverMode, n = parseInt(v, 10), m;
     if (v != null && String(v).length > 2) { m = /(\d+)/.exec(String(v)); if (m) n = m[1] == "3" ? 0 : (m[1] == "8" ? 2 : 1); }
-    if (isNaN(n) || n < 0 || n >= SERVER_MODES.length) n = 0; /* default RAPIDO */
+    if (isNaN(n) || n < 0 || n >= SERVER_MODES.length) n = 2; /* default COMPLETO */
     return SERVER_MODES[n];
 }
 function wantServers() { return serverMode().want; }
