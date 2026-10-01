@@ -3401,26 +3401,24 @@ function okruSourcesFromMeta(meta, label) {
     return srcs;
 }
 function okruFetchSearchPage(q) {
-    /* Búsqueda pública en OK.ru (como el navegador, sin login).
-       Desde algunos IPs ok.ru/video/search responde vacío; por eso hay varios espejos. */
+function okruFetchSearchPage(q) {
+    /* Usamos m.ok.ru (versión móvil) que rara vez bloquea bots y responde mucho más rápido */
     var urls = [
-        "https://ok.ru/video/search?st.search=" + enc(q),
         "https://m.ok.ru/video/search?st.search=" + enc(q),
-        "https://ok.ru/dk?st.cmd=searchResult&st.mode=Movie&st.grmode=Groups&st.query=" + enc(q)
-    ], refs = ["https://ok.ru/", "https://m.ok.ru/", "https://ok.ru/"], i, html;
+        "https://ok.ru/video/search?st.search=" + enc(q)
+    ];
+    var html, i;
+    
     for (i = 0; i < urls.length && budgetLeft(); i++) {
-        html = httpGet(urls[i], refs[i]);
-        if (html && html.length >= 800 && /\/(?:video|videoembed)\/\d+/i.test(html)) {
-            log("  OK.ru web search OK " + hostOf(urls[i]) + " q='" + q.substring(0, 36) + "' bytes=" + html.length);
+        html = httpGet(urls[i], "https://m.ok.ru/");
+        if (html && html.length > 500) {
+            log("  OK.ru internal search OK " + hostOf(urls[i]));
             return html;
         }
-        if (html && html.length > 0 && html.length < 800)
-            log("  OK.ru web search corto " + hostOf(urls[i]) + " bytes=" + html.length);
-        else if (!html)
-            log("  OK.ru web search vacio " + hostOf(urls[i]) + " q='" + q.substring(0, 28) + "'");
     }
     return "";
 }
+
 /* Descubrimiento público vía buscador web (sin cuenta OK.ru).
    Imita lo que haces en el navegador: buscar el título y llegar a ok.ru/video/ID.
    DuckDuckGo HTML lista enlaces ok.ru sin login. */
@@ -3528,22 +3526,23 @@ function provOkruDirect(ctx) {
 
     log("  OK.ru queries: " + queries.slice(0, 4).join(" | "));
 
-    /* 1) BÚSQUEDA WEB EXTERNA PRIMERO (Bing/Yandex/DDG). 
-       Es más rápida y no sufre los bloqueos severos de ok.ru. */
-    for (i = 0; i < Math.min(queries.length, 2) && hits.length < 16 && budgetLeft(); i++) {
-        pushHits(okruDiscoverViaWeb(queries[i]));
+    /* 1) BÚSQUEDA DIRECTA EN OK.RU MÓVIL PRIMERO.
+       Atrapa videos que Bing/Google no indexan. */
+    for (i = 0; i < queries.length && hits.length < 10 && budgetLeft(); i++) {
+        q = queries[i];
+        html = okruFetchSearchPage(q);
+        if (html) {
+            pushHits(okruCollectSearchHits(html));
+            log("  OK.ru internal '" + q.substring(0, 40) + "' -> hits: " + hits.length);
+        }
         if (hits.length >= 4) break;
     }
 
-    /* 2) BÚSQUEDA DIRECTA EN OK.RU (Solo como respaldo si sobra tiempo) */
-    if (hits.length < 4 && budgetLeft()) {
-        for (i = 0; i < queries.length && hits.length < 16 && budgetLeft(); i++) {
-            q = queries[i];
-            html = okruFetchSearchPage(q);
-            if (!html) continue;
-            pushHits(okruCollectSearchHits(html));
-            log("  OK.ru search '" + q.substring(0, 40) + "' -> hits acumulados " + hits.length);
-            if (hits.length >= 8) break;
+    /* 2) BÚSQUEDA WEB EXTERNA COMO RESPALDO.
+       Solo si el buscador de OK.ru falló o no encontró nada. */
+    if (hits.length === 0 && budgetLeft()) {
+        for (i = 0; i < Math.min(queries.length, 2) && hits.length < 10 && budgetLeft(); i++) {
+            pushHits(okruDiscoverViaWeb(queries[i]));
         }
     }
     
