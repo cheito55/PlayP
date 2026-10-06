@@ -1,8 +1,8 @@
 /*
- * StreamflixHub v1.8.31 - Inspecciona todos los servidores de la web; muestra solo 8 activos.
- *   No se descarta Filemoon/VidHide/VOE/Dood/Netu/Waaw/HLS antes de probarlos.
+ * StreamflixHub v1.8.32 - Muestra hasta 8 servidores que de verdad entregan video.
+ *   Un servidor caido no ocupa cupo. Si Poseidon solo aporta 1, se completa con
+ *   PelisJuanita, Cuevana y Pelisflix1. StreamWish usa el referer del embed.
  *   Prioridad Poseidon > PelisJuanita > Cuevana > Pelisflix1.
- *   Si una web trae 18, se prueban los 18. El limite de 8 se aplica al final, en la ficha.
  *   OK.ru / Dailymotion / Archive.org / Odysee quedan despues, y solo si faltan activos.
  *   Esos hosts abiertos exigen capitulo > 10 min y pelicula > 50 min.
  * (base) StreamflixHub v1.8.28 - OK.ru reconoce 'N серия' (ej. Verano del 98 - 186 серия); queries sin apóstrofe; sin YouTube.
@@ -550,6 +550,35 @@ function addSrc(arr, s) {
     var i;
     for (i = 0; i < arr.length; i++) if (arr[i].url == s.url) return;
     arr.push(s);
+}
+function sourceReferer(s, fallback) {
+    var rm = s && s.requestModifier, h = rm && rm.headers;
+    return (h && (h.Referer || h.referer)) || fallback || "";
+}
+/* Descarta paginas de error. Un m3u8 real o un mp4 cuentan como servidor activo. */
+function sourceIsPlayable(s, fallbackRef) {
+    var u, ref, b, head;
+    if (!s || !s.url) return false;
+    u = String(s.url);
+    if (!/^https?:\/\//i.test(u)) return false;
+    if (!/\.(?:m3u8|mp4|mpd)(?:[?#]|$)/i.test(u) && !/\b(?:m3u8|mp4|mpd)\b/i.test(u)) return false;
+    ref = sourceReferer(s, fallbackRef) || (originOf(u) + "/");
+    b = httpGet(u, ref);
+    if (!b) return /\/e\/|streamwish|swdyu|strwish|hlswish|playerwish/i.test(ref + " " + u);
+    head = b.substring(0, 400);
+    if (/<!doctype|<html|file was deleted|video not found|has been removed|not found|login/i.test(head)) return false;
+    if (/\.m3u8|\bm3u8\b/i.test(u)) return /#EXTM3U|#EXTINF|#EXT-X-/i.test(b);
+    return true;
+}
+function tagEmbedReferer(arr, embedUrl) {
+    var i, ref;
+    ref = embedUrl || "";
+    if (!ref) return arr || [];
+    for (i = 0; i < (arr || []).length; i++) {
+        if (!arr[i]) continue;
+        arr[i].requestModifier = reqMod(ref);
+    }
+    return arr || [];
 }
 
 /* --- desempaquetador Dean Edwards (p.a.c.k.e.r) --- */
@@ -1213,7 +1242,8 @@ function exPoseidonPlayer(url, label, ref) {
     log("    proxy-player links=" + links.length + (links[0] ? (" -> " + links[0].substring(0, 90)) : ""));
     for (i = 0; i < links.length && budgetLeft() && out.length < 3; i++) {
         if (isProxyPlayerHost(hostOf(links[i]))) continue;
-        more = resolveEmbed(links[i], label, url, 1);
+        more = resolveEmbed(links[i], label, links[i], 1);
+        tagEmbedReferer(more, links[i]);
         for (j = 0; j < more.length; j++) addSrc(out, more[j]);
         if (out.length) break;
     }
@@ -1277,7 +1307,11 @@ function exStreamWish(url, label, ref) {
         if (!html || html.length < 400) continue;
         out = extractPackedSources(html, u, label || "StreamWish");
         if (!out.length) out = scanMedia(html, label || "StreamWish", u, u);
-        if (out.length) { log("    streamwish OK @" + list[i] + " -> " + out.length); return out; }
+        if (out.length) {
+            tagEmbedReferer(out, u);
+            log("    streamwish OK @" + list[i] + " -> " + out.length);
+            return out;
+        }
     }
     log("    streamwish: sin fuente");
     return out;
@@ -1786,11 +1820,16 @@ function resolveCands(cands, out, prov, need, maxTry) {
             for (j = 0; j < got.length; j++) if (got[j] && got[j].url) _lat[got[j].url] = ms;
         }
         n++;
+        var playable = [], pj;
+        for (pj = 0; pj < got.length; pj++) {
+            got[pj].name = got[pj].name && got[pj].name.indexOf(prov) >= 0 ? got[pj].name : label;
+            if (sourceIsPlayable(got[pj], c.url || c.ref)) playable.push(got[pj]);
+        }
         var urlsFound = [];
-        for (j = 0; j < got.length; j++) urlsFound.push(String(got[j].url || "").substring(0, 140));
-        log("  " + label + " [" + (c.url || "").substring(0, 200) + "] -> " + got.length + (urlsFound.length ? " :: " + urlsFound.join(" | ") : ""));
+        for (j = 0; j < playable.length; j++) urlsFound.push(String(playable[j].url || "").substring(0, 140));
+        log("  " + label + " [" + (c.url || "").substring(0, 160) + "] -> " + got.length + " extraidos, " + playable.length + " activos" + (urlsFound.length ? " :: " + urlsFound.join(" | ") : ""));
         var before = out.length;
-        for (j = 0; j < got.length; j++) { got[j].name = got[j].name && got[j].name.indexOf(prov) >= 0 ? got[j].name : label; addSrc(out, got[j]); }
+        for (j = 0; j < playable.length; j++) addSrc(out, playable[j]);
         if (out.length > before) good++;
     }
     return good;
@@ -3611,7 +3650,7 @@ function provOkruDirect(ctx) {
         }
     }
 
-    log("  OK.ru build v1.8.31 inspecciona-todo");
+    log("  OK.ru build v1.8.32 cupo-activos");
     log("  OK.ru queries: " + queries.slice(0, 6).join(" | "));
 
     /*
@@ -4169,11 +4208,11 @@ function makeDescriptor(sources) {
 var PRIORITY_QUOTA = 8;
 var PROVIDERS = [
     /* 1) Dominios prioritarios: se drenan completos hasta llenar 6 opciones, en este orden. */
-    { id: "poseidon", name: "PoseidonHD", fast: 1, early: 1, priority: 1, cap: 55000, prefetch: poseidonPrefetchUrls, candidates: provPoseidon },
-    { id: "juanita", name: "PelisJuanita", fast: 1, early: 1, priority: 1, cap: 45000, prefetch: juanitaPrefetchUrls, candidates: provJuanita },
-    { id: "cuevanaapi", name: "Cuevana", fast: 1, early: 1, priority: 1, cap: 40000, prefetch: cuevanaApiPrefetchUrls, candidates: provCuevanaApi },
-    { id: "cuevana", name: "Cuevana3", fast: 1, early: 1, priority: 1, cap: 40000, prefetch: cuevanaPrefetchUrls, candidates: provCuevana },
-    { id: "pelisflix1", name: "Pelisflix1", fast: 1, early: 1, priority: 1, cap: 40000, prefetch: pelisflixPrefetchUrls, candidates: provPelisflix1 },
+    { id: "poseidon", name: "PoseidonHD", fast: 1, early: 1, priority: 1, cap: 20000, prefetch: poseidonPrefetchUrls, candidates: provPoseidon },
+    { id: "juanita", name: "PelisJuanita", fast: 1, early: 1, priority: 1, cap: 18000, prefetch: juanitaPrefetchUrls, candidates: provJuanita },
+    { id: "cuevanaapi", name: "Cuevana", fast: 1, early: 1, priority: 1, cap: 16000, prefetch: cuevanaApiPrefetchUrls, candidates: provCuevanaApi },
+    { id: "cuevana", name: "Cuevana3", fast: 1, early: 1, priority: 1, cap: 16000, prefetch: cuevanaPrefetchUrls, candidates: provCuevana },
+    { id: "pelisflix1", name: "Pelisflix1", fast: 1, early: 1, priority: 1, cap: 16000, prefetch: pelisflixPrefetchUrls, candidates: provPelisflix1 },
     /* 2) Hosts abiertos: solo si servidoresPlus y todavia falta cupo. Filtro de duracion en cada extractor. */
     { id: "okrudirect", name: "OK.ru", fast: 1, early: 0, plus: 1, open: 1, cap: 14000, prefetch: function () { return []; }, candidates: provOkruDirect },
     { id: "dailymotion", name: "Dailymotion", fast: 1, early: 0, plus: 1, open: 1, cap: 10000, prefetch: function () { return []; }, candidates: provDailymotion },
@@ -4232,8 +4271,8 @@ function capResultsBase(out, n) {
 
 function collectSources(ctx) {
     var out = [], i, servers = 0, site, wp = 0, wpPlan = [], want = PRIORITY_QUOTA, maxRes = PRIORITY_QUOTA;
-    log("modo: inspeccionar toda la web, mostrar " + want + " activos | Poseidon > PelisJuanita > Cuevana > Pelisflix1; luego OK.ru > Dailymotion > Archive.org > Odysee");
-    if (_deadline < Date.now() + 80000) _deadline = Date.now() + 80000;
+    log("modo: solo activos, completar " + want + " con el siguiente dominio | Poseidon > PelisJuanita > Cuevana > Pelisflix1");
+    if (_deadline < Date.now() + 90000) _deadline = Date.now() + 90000;
 
     var soloOk = onlyOkru();
     var plusOn = servidoresPlus();
@@ -4268,11 +4307,10 @@ function collectSources(ctx) {
             _deadline = Math.min(globalDeadline, Date.now() + (list[k].cap || 5000));
             try {
                 cands = list[k].candidates(ctx) || [];
-                /* Prioridad: probar todos los servidores de esta web, sin descartar antes de saber si abren.
-                   El cupo de 8 se aplica al armar la ficha, no durante la inspeccion. */
-                added = resolveCands(cands, out, list[k].name, drainDomain ? 0 : (want - servers), drainDomain ? 0 : 12);
+                /* Probar esta web, pero un caido no cuenta. Si no llega a 8 activos, el siguiente dominio entra ya. */
+                added = resolveCands(cands, out, list[k].name, want - servers, drainDomain ? 12 : 8);
                 servers += added;
-                log("  " + list[k].name + " probo " + (cands.length || 0) + ", activos " + added + "; total activos " + servers + " (se muestran " + want + ")");
+                log("  " + list[k].name + " activos " + added + "; total " + servers + "/" + want + (servers < want ? " -> sigue el siguiente dominio" : " -> cupo completo"));
             } catch (e) { log("  ERROR " + list[k].name + ": " + e); }
             if (Date.now() >= _deadline && Date.now() < globalDeadline) log("  (tope de tiempo de " + list[k].name + ")");
             _deadline = globalDeadline;
